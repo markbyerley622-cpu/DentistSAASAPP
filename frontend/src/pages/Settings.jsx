@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
-import { settingsAPI, calendarAPI, twilioAPI, authAPI, bookingSlotsAPI } from '../lib/api'
+import { settingsAPI, calendarAPI, authAPI, bookingSlotsAPI } from '../lib/api'
 import {
   Settings as SettingsIcon,
   Building2,
@@ -13,8 +13,6 @@ import {
   Check,
   X,
   AlertCircle,
-  AlertTriangle,
-  ExternalLink,
   Save,
   Loader2,
   Link2,
@@ -114,7 +112,6 @@ export default function Settings() {
   const [calendarCredentialsConfigured, setCalendarCredentialsConfigured] = useState(false)
   const [googleCredentials, setGoogleCredentials] = useState({ clientId: '', clientSecret: '' })
   const [savingGoogleCredentials, setSavingGoogleCredentials] = useState(false)
-  const [twilioTesting, setTwilioTesting] = useState(false)
   const [bookingSlots, setBookingSlots] = useState([])
   const [newSlot, setNewSlot] = useState({ day: 'monday', time: '' })
   const [slotsLoading, setSlotsLoading] = useState(false)
@@ -199,7 +196,7 @@ export default function Settings() {
 
   const handleSaveForwarding = async () => {
     if (!settings.forwardingPhone) {
-      setError('Please enter your forwarding phone number')
+      setError('Please enter your phone number')
       return
     }
 
@@ -208,23 +205,11 @@ export default function Settings() {
       await settingsAPI.updateForwarding({
         forwardingPhone: settings.forwardingPhone
       })
-      setSuccess('Forwarding number saved! Calls will now forward to this number.')
+      setSuccess('Phone number saved!')
     } catch (err) {
-      setError(err.response?.data?.error?.message || 'Failed to save forwarding number')
+      setError(err.response?.data?.error?.message || 'Failed to save phone number')
     } finally {
       setSaving(false)
-    }
-  }
-
-  const handleTestTwilio = async () => {
-    setTwilioTesting(true)
-    try {
-      await twilioAPI.test()
-      setSuccess('Twilio connection successful!')
-    } catch (err) {
-      setError(err.response?.data?.error?.message || 'Twilio connection failed')
-    } finally {
-      setTwilioTesting(false)
     }
   }
 
@@ -389,52 +374,12 @@ export default function Settings() {
       {/* Call Forwarding */}
       <SettingsSection
         title="Call Forwarding"
-        description="Configure where patient calls are forwarded to"
+        description="Enter the phone number where patient calls should be forwarded"
         icon={Phone}
       >
         <div className="space-y-4">
-          {/* Status indicator */}
-          {settings.twilioPhone ? (
-            <div className="p-4 rounded-lg bg-success-500/10 border border-success-500/20">
-              <div className="flex items-start gap-3">
-                <Check className="w-5 h-5 text-success-400 mt-0.5" />
-                <div>
-                  <p className="text-sm font-medium text-success-400">SMS Follow-up Active</p>
-                  <p className="text-xs text-success-400/70 mt-1">
-                    When you miss a call, patients automatically receive an SMS follow-up.
-                  </p>
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="p-4 rounded-lg bg-warning-500/10 border border-warning-500/20">
-              <div className="flex items-start gap-3">
-                <AlertTriangle className="w-5 h-5 text-warning-400 mt-0.5" />
-                <div>
-                  <p className="text-sm font-medium text-warning-400">Setup Pending</p>
-                  <p className="text-xs text-warning-400/70 mt-1">
-                    Your practice phone number is being configured. Contact support if this persists.
-                  </p>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Patient phone number (read-only) */}
-          {settings.twilioPhone && (
-            <div className="input-group">
-              <label className="input-label">Your Practice Phone Number</label>
-              <div className="input bg-dark-800/50 text-dark-300 cursor-not-allowed flex items-center justify-between">
-                <span>{settings.twilioPhone}</span>
-                <span className="text-xs text-dark-500">Managed by SmileDesk</span>
-              </div>
-              <p className="text-xs text-dark-500 mt-1">This is the number patients call. Share this with your patients.</p>
-            </div>
-          )}
-
-          {/* Forwarding phone (editable) */}
           <div className="input-group">
-            <label className="input-label">Forward Calls To</label>
+            <label className="input-label">Your Phone Number</label>
             <input
               type="tel"
               value={settings.forwardingPhone || ''}
@@ -443,13 +388,13 @@ export default function Settings() {
               placeholder="+61414855294"
             />
             <p className="text-xs text-dark-500 mt-1">
-              Your mobile or office phone. Calls ring here first - if you don't answer, patient gets an SMS.
+              Business or personal - calls ring here first. If you miss a call, the patient gets an automatic SMS follow-up.
             </p>
           </div>
 
           <button onClick={handleSaveForwarding} disabled={saving} className="btn-primary">
             {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-            <span className="ml-2">Save Forwarding Number</span>
+            <span className="ml-2">Save</span>
           </button>
         </div>
       </SettingsSection>
