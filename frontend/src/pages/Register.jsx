@@ -35,8 +35,8 @@ export default function Register() {
   }
 
   const features = [
-    'Instant missed call follow-up',
-    'AI texts & calls patients back',
+    'Instant missed patient SMS follow-up',
+    'AI instantly texts patients back',
     'Smart appointment booking',
     'Track responses & conversions'
   ]
@@ -70,11 +70,11 @@ export default function Register() {
           <h1 className="text-4xl lg:text-5xl font-bold text-white leading-tight mb-6">
             Start converting
             <br />
-            <span className="text-gradient">missed calls today</span>
+            <span className="text-gradient">missed patients today</span>
           </h1>
 
           <p className="text-lg text-dark-300 max-w-md mb-10">
-            Join dental practices using AI to instantly follow up on missed calls and book more appointments.
+            Join dental practices using AI SMS to instantly follow up with patients and book more appointments.
           </p>
 
           <div className="space-y-4">

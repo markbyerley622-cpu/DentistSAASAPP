@@ -191,7 +191,7 @@ export default function Dashboard() {
         <div>
           <h1 className="text-2xl font-bold text-dark-100">Dashboard</h1>
           <p className="text-dark-400 mt-1">
-            Track missed calls and instant AI follow-ups.
+            Track missed patient calls and instant AI SMS follow-ups.
           </p>
         </div>
         <div className="flex items-center gap-4">
@@ -352,7 +352,7 @@ export default function Dashboard() {
             <div>
               <h3 className="text-lg font-semibold text-dark-100">Instant Follow-up Active</h3>
               <p className="text-dark-400 mt-1">
-                AI instantly responds to missed calls via SMS/call. Never lose a patient to a missed call again.
+                AI instantly responds to missed calls via SMS. Never lose a patient again.
               </p>
             </div>
           </div>

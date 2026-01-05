@@ -85,9 +85,15 @@ export const settingsAPI = {
 
 // Calendar API
 export const calendarAPI = {
+  // OAuth credentials management (per-user)
+  getCredentialsStatus: () => api.get('/calendar/credentials-status'),
+  saveCredentials: (data) => api.post('/calendar/credentials', data),
+  removeCredentials: () => api.delete('/calendar/credentials'),
+  // Calendar connection
   getAuthUrl: () => api.get('/calendar/auth-url'),
   getStatus: () => api.get('/calendar/status'),
   disconnect: () => api.post('/calendar/disconnect'),
+  // Calendar operations
   getEvents: (params) => api.get('/calendar/events', { params }),
   createEvent: (data) => api.post('/calendar/events', data),
   getAvailability: (date) => api.get('/calendar/availability', { params: { date } }),

@@ -3,7 +3,7 @@ import { Outlet, NavLink, useLocation } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import {
   LayoutDashboard,
-  Phone,
+  PhoneMissed,
   Users,
   Settings,
   LogOut,
@@ -16,7 +16,7 @@ import {
 
 const navigation = [
   { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-  { name: 'Missed Calls', href: '/calls', icon: Phone },
+  { name: 'Missed Patients', href: '/missed-patients', icon: PhoneMissed },
   { name: 'Follow-ups', href: '/leads', icon: Users },
   { name: 'Settings', href: '/settings', icon: Settings },
 ]
@@ -35,7 +35,7 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
         {!collapsed && (
           <div className="animate-fade-in">
             <h1 className="font-semibold text-dark-100">SmileDesk</h1>
-            <p className="text-xs text-dark-500">Never miss a call again</p>
+            <p className="text-xs text-dark-500">Never miss a patient again</p>
           </div>
         )}
       </div>

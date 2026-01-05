@@ -55,11 +55,11 @@ export default function Login() {
           <h1 className="text-4xl lg:text-5xl font-bold text-white leading-tight mb-6">
             Never Miss
             <br />
-            <span className="text-gradient">A Call Again</span>
+            <span className="text-gradient">A Patient Call Again</span>
           </h1>
 
           <p className="text-lg text-dark-300 max-w-md mb-8">
-            Instant AI follow-up for every missed call. Convert more patients while you focus on what matters most.
+            Instant AI SMS follow-up for every missed patient. Convert more patients while you focus on what matters most.
           </p>
 
           <div className="flex items-center gap-6 text-dark-400">

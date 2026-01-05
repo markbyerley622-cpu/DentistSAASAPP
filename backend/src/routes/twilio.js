@@ -5,10 +5,26 @@ const { authenticate } = require('../middleware/auth');
 
 const router = express.Router();
 
-// Twilio webhook - handles incoming calls (no auth required for webhooks)
-router.post('/voice/incoming', async (req, res) => {
+/**
+ * SmileDesk Twilio Integration - SMS Only
+ *
+ * This module handles SMS-based patient communication:
+ * 1. When a call is missed, the system sends an automatic SMS follow-up
+ * 2. Patients can reply to SMS messages to interact with the AI
+ * 3. All communication is text-based (no voice/call handling by AI)
+ *
+ * Flow:
+ * 1. Patient calls practice number -> call goes unanswered (missed)
+ * 2. Twilio detects missed call and triggers webhook
+ * 3. SmileDesk sends instant SMS follow-up to the patient
+ * 4. Patient replies via SMS -> AI responds via SMS
+ * 5. Conversation continues until appointment is booked or resolved
+ */
+
+// Twilio webhook - handles incoming SMS messages (no auth required for webhooks)
+router.post('/sms/incoming', async (req, res) => {
   try {
-    const { CallSid, From, To, CallStatus } = req.body;
+    const { MessageSid, From, To, Body } = req.body;
 
     // Find user by Twilio phone number
     const settingsResult = await query(
@@ -20,132 +36,179 @@ router.post('/voice/incoming', async (req, res) => {
     );
 
     if (settingsResult.rows.length === 0) {
-      const twiml = new twilio.twiml.VoiceResponse();
-      twiml.say('Sorry, this number is not configured. Goodbye.');
-      twiml.hangup();
+      const twiml = new twilio.twiml.MessagingResponse();
+      twiml.message('Sorry, this number is not configured. Please contact the practice directly.');
       return res.type('text/xml').send(twiml.toString());
     }
 
     const settings = settingsResult.rows[0];
-    const greeting = settings.ai_greeting || `Hello! Thank you for calling ${settings.practice_name}. How can I help you today?`;
 
-    // Create call record
-    await query(
-      `INSERT INTO calls (user_id, twilio_call_sid, caller_phone, status)
-       VALUES ($1, $2, $3, $4)`,
-      [settings.user_id, CallSid, From, 'in-progress']
+    // Find or create conversation for this phone number
+    let conversationResult = await query(
+      `SELECT * FROM conversations
+       WHERE user_id = $1 AND caller_phone = $2 AND status = 'active'
+       ORDER BY created_at DESC LIMIT 1`,
+      [settings.user_id, From]
     );
 
-    // Generate TwiML response
-    const twiml = new twilio.twiml.VoiceResponse();
+    let conversationId;
 
-    // Greet the caller
-    twiml.say({ voice: 'Polly.Joanna' }, greeting);
-
-    // Record the call for transcription
-    twiml.record({
-      transcribe: true,
-      transcribeCallback: '/api/twilio/transcription',
-      maxLength: 300,
-      playBeep: false,
-      action: '/api/twilio/voice/handle-recording',
-      recordingStatusCallback: '/api/twilio/recording-status'
-    });
-
-    res.type('text/xml').send(twiml.toString());
-  } catch (error) {
-    console.error('Incoming call error:', error);
-    const twiml = new twilio.twiml.VoiceResponse();
-    twiml.say('We are experiencing technical difficulties. Please try again later.');
-    res.type('text/xml').send(twiml.toString());
-  }
-});
-
-// Handle recording completion
-router.post('/voice/handle-recording', async (req, res) => {
-  try {
-    const { CallSid, RecordingUrl, RecordingDuration } = req.body;
-
-    // Update call with recording info
-    await query(
-      `UPDATE calls
-       SET recording_url = $1, duration = $2
-       WHERE twilio_call_sid = $3`,
-      [RecordingUrl, parseInt(RecordingDuration) || 0, CallSid]
-    );
-
-    const twiml = new twilio.twiml.VoiceResponse();
-    twiml.say({ voice: 'Polly.Joanna' }, 'Thank you for your message. We will get back to you shortly. Goodbye!');
-    twiml.hangup();
-
-    res.type('text/xml').send(twiml.toString());
-  } catch (error) {
-    console.error('Handle recording error:', error);
-    const twiml = new twilio.twiml.VoiceResponse();
-    twiml.hangup();
-    res.type('text/xml').send(twiml.toString());
-  }
-});
-
-// Handle transcription callback
-router.post('/transcription', async (req, res) => {
-  try {
-    const { CallSid, TranscriptionText, TranscriptionStatus } = req.body;
-
-    if (TranscriptionStatus === 'completed' && TranscriptionText) {
-      // Update call with transcription
-      const callResult = await query(
-        `UPDATE calls
-         SET transcription = $1, status = 'completed'
-         WHERE twilio_call_sid = $2
-         RETURNING *`,
-        [TranscriptionText, CallSid]
+    if (conversationResult.rows.length === 0) {
+      // Create new conversation
+      const newConversation = await query(
+        `INSERT INTO conversations (user_id, caller_phone, channel, direction, status)
+         VALUES ($1, $2, 'sms', 'inbound', 'active')
+         RETURNING id`,
+        [settings.user_id, From]
       );
-
-      if (callResult.rows.length > 0) {
-        const call = callResult.rows[0];
-
-        // Auto-create lead from transcription
-        // Extract potential caller info from transcription
-        const callerName = extractName(TranscriptionText);
-        const reason = extractReason(TranscriptionText);
-
-        await query(
-          `INSERT INTO leads (user_id, call_id, name, phone, reason, status)
-           VALUES ($1, $2, $3, $4, $5, 'new')`,
-          [call.user_id, call.id, callerName || 'Unknown Caller', call.caller_phone, reason]
-        );
-      }
+      conversationId = newConversation.rows[0].id;
+    } else {
+      conversationId = conversationResult.rows[0].id;
     }
 
-    res.status(200).send('OK');
+    // Store the incoming message
+    await query(
+      `INSERT INTO messages (conversation_id, sender, content, message_type, twilio_sid, delivered)
+       VALUES ($1, 'caller', $2, 'text', $3, true)`,
+      [conversationId, Body, MessageSid]
+    );
+
+    // Generate AI response (simplified - in production would use actual AI)
+    const aiResponse = generateAIResponse(Body, settings);
+
+    // Store AI response
+    await query(
+      `INSERT INTO messages (conversation_id, sender, content, message_type, delivered)
+       VALUES ($1, 'ai', $2, 'text', true)`,
+      [conversationId, aiResponse]
+    );
+
+    // Send response via TwiML
+    const twiml = new twilio.twiml.MessagingResponse();
+    twiml.message(aiResponse);
+
+    res.type('text/xml').send(twiml.toString());
   } catch (error) {
-    console.error('Transcription callback error:', error);
-    res.status(500).send('Error');
+    console.error('Incoming SMS error:', error);
+    const twiml = new twilio.twiml.MessagingResponse();
+    twiml.message('We experienced a technical issue. Please try again or call the practice directly.');
+    res.type('text/xml').send(twiml.toString());
   }
 });
 
-// Recording status callback
-router.post('/recording-status', async (req, res) => {
+// Twilio webhook - handles missed calls (triggers SMS follow-up)
+router.post('/call/missed', async (req, res) => {
   try {
-    const { CallSid, RecordingStatus, RecordingUrl } = req.body;
+    const { CallSid, From, To, CallStatus } = req.body;
 
-    if (RecordingStatus === 'completed') {
+    // Only handle missed/no-answer/busy calls
+    if (!['no-answer', 'busy', 'failed', 'canceled'].includes(CallStatus)) {
+      return res.status(200).send('OK');
+    }
+
+    // Find user by Twilio phone number
+    const settingsResult = await query(
+      `SELECT s.*, u.id as user_id, u.practice_name
+       FROM settings s
+       JOIN users u ON s.user_id = u.id
+       WHERE s.twilio_phone = $1`,
+      [To]
+    );
+
+    if (settingsResult.rows.length === 0) {
+      return res.status(200).send('OK');
+    }
+
+    const settings = settingsResult.rows[0];
+
+    // Create missed call record
+    const callResult = await query(
+      `INSERT INTO calls (user_id, twilio_call_sid, caller_phone, status, is_missed, followup_status)
+       VALUES ($1, $2, $3, $4, true, 'pending')
+       RETURNING id`,
+      [settings.user_id, CallSid, From, CallStatus]
+    );
+
+    const callId = callResult.rows[0].id;
+
+    // Create conversation for follow-up
+    const conversationResult = await query(
+      `INSERT INTO conversations (user_id, call_id, caller_phone, channel, direction, status)
+       VALUES ($1, $2, $3, 'sms', 'outbound', 'active')
+       RETURNING id`,
+      [settings.user_id, callId, From]
+    );
+
+    const conversationId = conversationResult.rows[0].id;
+
+    // Get follow-up message (custom or default)
+    const practiceName = settings.practice_name || 'our practice';
+    const followUpMessage = settings.ai_greeting ||
+      `Hi! We noticed we missed your call at ${practiceName}. How can we help you today? Reply to this message or let us know a good time to reach you.`;
+
+    // Send SMS follow-up using Twilio client
+    if (settings.twilio_account_sid && settings.twilio_auth_token) {
+      const client = twilio(settings.twilio_account_sid, settings.twilio_auth_token);
+
+      const message = await client.messages.create({
+        body: followUpMessage,
+        from: To, // Send from the practice's Twilio number
+        to: From  // Send to the caller
+      });
+
+      // Store the outgoing message
       await query(
-        `UPDATE calls SET recording_url = $1 WHERE twilio_call_sid = $2`,
-        [RecordingUrl, CallSid]
+        `INSERT INTO messages (conversation_id, sender, content, message_type, twilio_sid, delivered)
+         VALUES ($1, 'ai', $2, 'text', $3, true)`,
+        [conversationId, followUpMessage, message.sid]
+      );
+
+      // Update call with conversation link and followup status
+      await query(
+        `UPDATE calls SET conversation_id = $1, followup_status = 'in_progress', followup_attempts = 1, last_followup_at = NOW()
+         WHERE id = $2`,
+        [conversationId, callId]
+      );
+
+      // Create lead from missed call
+      await query(
+        `INSERT INTO leads (user_id, call_id, conversation_id, name, phone, status, source)
+         VALUES ($1, $2, $3, 'Unknown Caller', $4, 'new', 'missed_call')`,
+        [settings.user_id, callId, conversationId, From]
       );
     }
 
     res.status(200).send('OK');
   } catch (error) {
-    console.error('Recording status error:', error);
+    console.error('Missed call handler error:', error);
     res.status(500).send('Error');
   }
 });
 
-// Call status callback
-router.post('/call-status', async (req, res) => {
+// SMS delivery status callback
+router.post('/sms/status', async (req, res) => {
+  try {
+    const { MessageSid, MessageStatus, ErrorCode, ErrorMessage } = req.body;
+
+    if (ErrorCode) {
+      console.error(`SMS delivery failed: ${ErrorCode} - ${ErrorMessage}`);
+    }
+
+    // Update message delivery status
+    await query(
+      `UPDATE messages SET delivered = $1 WHERE twilio_sid = $2`,
+      [MessageStatus === 'delivered', MessageSid]
+    );
+
+    res.status(200).send('OK');
+  } catch (error) {
+    console.error('SMS status callback error:', error);
+    res.status(500).send('Error');
+  }
+});
+
+// Call status callback (for tracking missed calls)
+router.post('/call/status', async (req, res) => {
   try {
     const { CallSid, CallStatus, CallDuration } = req.body;
 
@@ -209,47 +272,94 @@ router.post('/test', async (req, res) => {
   }
 });
 
-// Helper functions for extracting info from transcription
-function extractName(text) {
-  // Simple pattern matching for names
-  const patterns = [
-    /my name is ([A-Z][a-z]+ [A-Z][a-z]+)/i,
-    /this is ([A-Z][a-z]+ [A-Z][a-z]+)/i,
-    /I'm ([A-Z][a-z]+ [A-Z][a-z]+)/i,
-    /I am ([A-Z][a-z]+ [A-Z][a-z]+)/i
-  ];
+// POST /api/twilio/send-sms - Send a manual SMS to a patient
+router.post('/send-sms', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { to, message, conversationId } = req.body;
 
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
-    if (match) return match[1];
+    if (!to || !message) {
+      return res.status(400).json({ error: { message: 'Recipient and message are required' } });
+    }
+
+    const settingsResult = await query(
+      'SELECT twilio_account_sid, twilio_auth_token, twilio_phone FROM settings WHERE user_id = $1',
+      [userId]
+    );
+
+    if (settingsResult.rows.length === 0 || !settingsResult.rows[0].twilio_account_sid) {
+      return res.status(400).json({ error: { message: 'Twilio not configured' } });
+    }
+
+    const settings = settingsResult.rows[0];
+    const client = twilio(settings.twilio_account_sid, settings.twilio_auth_token);
+
+    const sentMessage = await client.messages.create({
+      body: message,
+      from: settings.twilio_phone,
+      to: to
+    });
+
+    // Store message if conversation exists
+    if (conversationId) {
+      await query(
+        `INSERT INTO messages (conversation_id, sender, content, message_type, twilio_sid, delivered)
+         VALUES ($1, 'ai', $2, 'text', $3, true)`,
+        [conversationId, message, sentMessage.sid]
+      );
+    }
+
+    res.json({
+      success: true,
+      messageSid: sentMessage.sid,
+      status: sentMessage.status
+    });
+  } catch (error) {
+    console.error('Send SMS error:', error);
+    res.status(500).json({ error: { message: 'Failed to send SMS' } });
+  }
+});
+
+// Helper function to generate AI response (simplified)
+function generateAIResponse(incomingMessage, settings) {
+  const lowerMessage = incomingMessage.toLowerCase();
+  const practiceName = settings.practice_name || 'our practice';
+
+  // Simple keyword-based responses (in production, use actual AI/NLP)
+  if (lowerMessage.includes('appointment') || lowerMessage.includes('book') || lowerMessage.includes('schedule')) {
+    return `Great! We'd love to schedule an appointment for you at ${practiceName}. What day and time works best for you? Our hours are Monday-Friday 9am-5pm.`;
   }
 
-  return null;
-}
-
-function extractReason(text) {
-  const lowerText = text.toLowerCase();
-
-  if (lowerText.includes('appointment') || lowerText.includes('schedule') || lowerText.includes('book')) {
-    return 'Appointment Request';
-  }
-  if (lowerText.includes('cleaning') || lowerText.includes('checkup') || lowerText.includes('check-up')) {
-    return 'Cleaning/Checkup';
-  }
-  if (lowerText.includes('pain') || lowerText.includes('hurt') || lowerText.includes('ache') || lowerText.includes('emergency')) {
-    return 'Emergency/Pain';
-  }
-  if (lowerText.includes('crown') || lowerText.includes('filling') || lowerText.includes('root canal')) {
-    return 'Dental Procedure';
-  }
-  if (lowerText.includes('insurance') || lowerText.includes('cost') || lowerText.includes('price')) {
-    return 'Insurance/Billing';
-  }
-  if (lowerText.includes('cancel') || lowerText.includes('reschedule')) {
-    return 'Reschedule/Cancel';
+  if (lowerMessage.includes('cancel') || lowerMessage.includes('reschedule')) {
+    return `No problem! I can help you with that. Please provide your name and the date of your current appointment, and we'll take care of it.`;
   }
 
-  return 'General Inquiry';
+  if (lowerMessage.includes('emergency') || lowerMessage.includes('pain') || lowerMessage.includes('urgent')) {
+    return `I'm sorry to hear you're in discomfort. For dental emergencies, please call our office directly. If it's after hours and you're experiencing severe pain, please visit your nearest emergency room.`;
+  }
+
+  if (lowerMessage.includes('cost') || lowerMessage.includes('price') || lowerMessage.includes('insurance')) {
+    return `For questions about costs and insurance, our front desk team can provide detailed information. Would you like us to have someone call you back, or would you prefer to schedule a consultation?`;
+  }
+
+  if (lowerMessage.includes('hours') || lowerMessage.includes('open')) {
+    return `${practiceName} is open Monday through Friday, 9am to 5pm. Would you like to schedule an appointment?`;
+  }
+
+  if (lowerMessage.includes('yes') || lowerMessage.includes('sure') || lowerMessage.includes('okay')) {
+    return `Perfect! What day and time works best for you? We have availability throughout the week.`;
+  }
+
+  if (lowerMessage.includes('no') || lowerMessage.includes('not now') || lowerMessage.includes('later')) {
+    return `No problem at all! Feel free to text us anytime when you're ready to schedule. We're here to help!`;
+  }
+
+  if (lowerMessage.includes('thank')) {
+    return `You're welcome! Is there anything else I can help you with today?`;
+  }
+
+  // Default response
+  return `Thanks for your message! How can we assist you today? We can help with scheduling appointments, answering questions about our services, or connecting you with our team.`;
 }
 
 module.exports = router;

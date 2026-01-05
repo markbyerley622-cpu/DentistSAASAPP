@@ -7,7 +7,7 @@ import ForgotPassword from './pages/ForgotPassword'
 import VerifyOTP from './pages/VerifyOTP'
 import ResetPassword from './pages/ResetPassword'
 import Dashboard from './pages/Dashboard'
-import Calls from './pages/Calls'
+import MissedPatients from './pages/MissedPatients'
 import Leads from './pages/Leads'
 import Settings from './pages/Settings'
 
@@ -108,7 +108,8 @@ function App() {
       >
         <Route index element={<Navigate to="/dashboard" replace />} />
         <Route path="dashboard" element={<Dashboard />} />
-        <Route path="calls" element={<Calls />} />
+        <Route path="missed-patients" element={<MissedPatients />} />
+        <Route path="calls" element={<Navigate to="/missed-patients" replace />} />
         <Route path="leads" element={<Leads />} />
         <Route path="settings" element={<Settings />} />
       </Route>
