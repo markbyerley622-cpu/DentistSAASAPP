@@ -131,6 +131,36 @@ router.put('/twilio', async (req, res) => {
   }
 });
 
+// PUT /api/settings/forwarding - Update call forwarding phone only
+router.put('/forwarding', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { forwardingPhone } = req.body;
+
+    if (!forwardingPhone) {
+      return res.status(400).json({
+        error: { message: 'Forwarding phone number is required' }
+      });
+    }
+
+    const result = await query(
+      `UPDATE settings
+       SET forwarding_phone = $1
+       WHERE user_id = $2
+       RETURNING *`,
+      [forwardingPhone, userId]
+    );
+
+    res.json({
+      message: 'Forwarding number updated',
+      settings: formatSettings(result.rows[0])
+    });
+  } catch (error) {
+    console.error('Update forwarding phone error:', error);
+    res.status(500).json({ error: { message: 'Failed to update forwarding phone' } });
+  }
+});
+
 // PUT /api/settings/notifications - Update notification settings
 router.put('/notifications', async (req, res) => {
   try {

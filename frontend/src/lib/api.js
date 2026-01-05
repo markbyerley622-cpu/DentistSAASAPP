@@ -78,6 +78,7 @@ export const settingsAPI = {
   get: () => api.get('/settings'),
   update: (data) => api.put('/settings', data),
   updateTwilio: (data) => api.put('/settings/twilio', data),
+  updateForwarding: (data) => api.put('/settings/forwarding', data),
   updateNotifications: (data) => api.put('/settings/notifications', data),
   updateBusinessHours: (data) => api.put('/settings/business-hours', data),
   updateAiGreeting: (data) => api.put('/settings/ai-greeting', data),

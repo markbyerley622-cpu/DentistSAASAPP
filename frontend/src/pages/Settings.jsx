@@ -13,6 +13,7 @@ import {
   Check,
   X,
   AlertCircle,
+  AlertTriangle,
   ExternalLink,
   Save,
   Loader2,
@@ -196,24 +197,20 @@ export default function Settings() {
     }
   }
 
-  const handleSaveTwilio = async () => {
-    if (!settings.twilioPhone || !settings.twilioAccountSid) {
-      setError('Please fill in Twilio phone number and Account SID')
+  const handleSaveForwarding = async () => {
+    if (!settings.forwardingPhone) {
+      setError('Please enter your forwarding phone number')
       return
     }
 
     setSaving(true)
     try {
-      await settingsAPI.updateTwilio({
-        twilioPhone: settings.twilioPhone,
-        forwardingPhone: settings.forwardingPhone,
-        twilioAccountSid: settings.twilioAccountSid,
-        twilioAuthToken: settings.twilioAuthToken // Optional on updates
+      await settingsAPI.updateForwarding({
+        forwardingPhone: settings.forwardingPhone
       })
-      setSuccess('Twilio settings saved successfully!')
-      setSettings(s => ({ ...s, twilioAuthToken: '' }))
+      setSuccess('Forwarding number saved! Calls will now forward to this number.')
     } catch (err) {
-      setError(err.response?.data?.error?.message || 'Failed to save Twilio settings')
+      setError(err.response?.data?.error?.message || 'Failed to save forwarding number')
     } finally {
       setSaving(false)
     }
@@ -389,81 +386,71 @@ export default function Settings() {
         </div>
       </SettingsSection>
 
-      {/* Twilio Integration */}
+      {/* Call Forwarding */}
       <SettingsSection
-        title="Twilio Integration"
-        description="Connect your Twilio account to enable AI SMS handling"
+        title="Call Forwarding"
+        description="Configure where patient calls are forwarded to"
         icon={Phone}
       >
         <div className="space-y-4">
-          {/* Auto-config notice */}
-          <div className="p-4 rounded-lg bg-success-500/10 border border-success-500/20">
-            <div className="flex items-start gap-3">
-              <Check className="w-5 h-5 text-success-400 mt-0.5" />
-              <div>
-                <p className="text-sm font-medium text-success-400">Automatic Configuration</p>
-                <p className="text-xs text-success-400/70 mt-1">
-                  Once connected, Twilio webhooks are automatically configured. Missed calls will instantly trigger AI SMS follow-ups.
-                </p>
+          {/* Status indicator */}
+          {settings.twilioPhone ? (
+            <div className="p-4 rounded-lg bg-success-500/10 border border-success-500/20">
+              <div className="flex items-start gap-3">
+                <Check className="w-5 h-5 text-success-400 mt-0.5" />
+                <div>
+                  <p className="text-sm font-medium text-success-400">SMS Follow-up Active</p>
+                  <p className="text-xs text-success-400/70 mt-1">
+                    When you miss a call, patients automatically receive an SMS follow-up.
+                  </p>
+                </div>
               </div>
             </div>
+          ) : (
+            <div className="p-4 rounded-lg bg-warning-500/10 border border-warning-500/20">
+              <div className="flex items-start gap-3">
+                <AlertTriangle className="w-5 h-5 text-warning-400 mt-0.5" />
+                <div>
+                  <p className="text-sm font-medium text-warning-400">Setup Pending</p>
+                  <p className="text-xs text-warning-400/70 mt-1">
+                    Your practice phone number is being configured. Contact support if this persists.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Patient phone number (read-only) */}
+          {settings.twilioPhone && (
+            <div className="input-group">
+              <label className="input-label">Your Practice Phone Number</label>
+              <div className="input bg-dark-800/50 text-dark-300 cursor-not-allowed flex items-center justify-between">
+                <span>{settings.twilioPhone}</span>
+                <span className="text-xs text-dark-500">Managed by SmileDesk</span>
+              </div>
+              <p className="text-xs text-dark-500 mt-1">This is the number patients call. Share this with your patients.</p>
+            </div>
+          )}
+
+          {/* Forwarding phone (editable) */}
+          <div className="input-group">
+            <label className="input-label">Forward Calls To</label>
+            <input
+              type="tel"
+              value={settings.forwardingPhone || ''}
+              onChange={(e) => setSettings({ ...settings, forwardingPhone: e.target.value })}
+              className="input"
+              placeholder="+61414855294"
+            />
+            <p className="text-xs text-dark-500 mt-1">
+              Your mobile or office phone. Calls ring here first - if you don't answer, patient gets an SMS.
+            </p>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="input-group">
-              <label className="input-label">Twilio Phone Number</label>
-              <input
-                type="tel"
-                value={settings.twilioPhone}
-                onChange={(e) => setSettings({ ...settings, twilioPhone: e.target.value })}
-                className="input"
-                placeholder="+1234567890"
-              />
-              <p className="text-xs text-dark-500 mt-1">The Twilio number patients will call</p>
-            </div>
-            <div className="input-group">
-              <label className="input-label">Forward Calls To</label>
-              <input
-                type="tel"
-                value={settings.forwardingPhone || ''}
-                onChange={(e) => setSettings({ ...settings, forwardingPhone: e.target.value })}
-                className="input"
-                placeholder="+61414855294"
-              />
-              <p className="text-xs text-dark-500 mt-1">Your real phone - calls forward here</p>
-            </div>
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="input-group">
-              <label className="input-label">Account SID</label>
-              <input
-                type="text"
-                value={settings.twilioAccountSid}
-                onChange={(e) => setSettings({ ...settings, twilioAccountSid: e.target.value })}
-                className="input"
-                placeholder="AC..."
-              />
-            </div>
-            <div className="input-group">
-              <label className="input-label">Auth Token</label>
-              <input
-                type="password"
-                value={settings.twilioAuthToken}
-                onChange={(e) => setSettings({ ...settings, twilioAuthToken: e.target.value })}
-                className="input"
-                placeholder="Enter new token to update"
-              />
-            </div>
-          </div>
-          <div className="flex items-center gap-3">
-            <button onClick={handleSaveTwilio} disabled={saving} className="btn-primary">
-              {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-              <span className="ml-2">Save Twilio Settings</span>
-            </button>
-            <button onClick={handleTestTwilio} disabled={twilioTesting} className="btn-secondary">
-              {twilioTesting ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Test Connection'}
-            </button>
-          </div>
+          <button onClick={handleSaveForwarding} disabled={saving} className="btn-primary">
+            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+            <span className="ml-2">Save Forwarding Number</span>
+          </button>
         </div>
       </SettingsSection>
 
