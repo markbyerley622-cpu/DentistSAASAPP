@@ -88,23 +88,38 @@ router.put('/', async (req, res) => {
 router.put('/twilio', async (req, res) => {
   try {
     const userId = req.user.id;
-    const { twilioPhone, twilioAccountSid, twilioAuthToken } = req.body;
+    const { twilioPhone, forwardingPhone, twilioAccountSid, twilioAuthToken } = req.body;
 
-    if (!twilioPhone || !twilioAccountSid || !twilioAuthToken) {
+    if (!twilioPhone || !twilioAccountSid) {
       return res.status(400).json({
-        error: { message: 'All Twilio fields are required' }
+        error: { message: 'Twilio phone number and Account SID are required' }
       });
     }
 
-    const result = await query(
-      `UPDATE settings
-       SET twilio_phone = $1,
-           twilio_account_sid = $2,
-           twilio_auth_token = $3
-       WHERE user_id = $4
-       RETURNING *`,
-      [twilioPhone, twilioAccountSid, twilioAuthToken, userId]
-    );
+    // Build dynamic query - only update auth token if provided
+    let updateQuery;
+    let params;
+
+    if (twilioAuthToken) {
+      updateQuery = `UPDATE settings
+         SET twilio_phone = $1,
+             forwarding_phone = $2,
+             twilio_account_sid = $3,
+             twilio_auth_token = $4
+         WHERE user_id = $5
+         RETURNING *`;
+      params = [twilioPhone, forwardingPhone || null, twilioAccountSid, twilioAuthToken, userId];
+    } else {
+      updateQuery = `UPDATE settings
+         SET twilio_phone = $1,
+             forwarding_phone = $2,
+             twilio_account_sid = $3
+         WHERE user_id = $4
+         RETURNING *`;
+      params = [twilioPhone, forwardingPhone || null, twilioAccountSid, userId];
+    }
+
+    const result = await query(updateQuery, params);
 
     res.json({
       message: 'Twilio settings updated',
@@ -197,6 +212,7 @@ function formatSettings(settings) {
   return {
     id: settings.id,
     twilioPhone: settings.twilio_phone,
+    forwardingPhone: settings.forwarding_phone,
     twilioAccountSid: settings.twilio_account_sid ? '••••' + settings.twilio_account_sid.slice(-4) : null,
     twilioAuthToken: settings.twilio_auth_token ? '••••••••' : null,
     hasTwilioCredentials: !!(settings.twilio_account_sid && settings.twilio_auth_token),

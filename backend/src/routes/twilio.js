@@ -14,12 +14,180 @@ const router = express.Router();
  * 3. All communication is text-based (no voice/call handling by AI)
  *
  * Flow:
- * 1. Patient calls practice number -> call goes unanswered (missed)
- * 2. Twilio detects missed call and triggers webhook
- * 3. SmileDesk sends instant SMS follow-up to the patient
- * 4. Patient replies via SMS -> AI responds via SMS
- * 5. Conversation continues until appointment is booked or resolved
+ * 1. Patient calls Twilio number
+ * 2. Twilio forwards call to dentist's real phone (via /voice/incoming webhook)
+ * 3. If dentist doesn't answer (missed), status callback fires
+ * 4. SmileDesk sends instant SMS follow-up to the patient
+ * 5. Patient replies via SMS -> AI responds via SMS
+ * 6. Conversation continues until appointment is booked or resolved
+ *
+ * SETUP IN TWILIO CONSOLE:
+ * For each phone number, configure:
+ * - Voice: Webhook URL = https://your-app.com/api/twilio/voice/incoming (HTTP POST)
+ * - Messaging: Webhook URL = https://your-app.com/api/twilio/sms/incoming (HTTP POST)
  */
+
+// Twilio webhook - handles incoming VOICE calls (forwards to dentist's phone)
+router.post('/voice/incoming', async (req, res) => {
+  try {
+    const { CallSid, From, To, CallStatus } = req.body;
+
+    console.log(`Incoming call from ${From} to ${To}`);
+
+    // Find user by Twilio phone number
+    const settingsResult = await query(
+      `SELECT s.*, u.id as user_id, u.practice_name, u.phone as user_phone
+       FROM settings s
+       JOIN users u ON s.user_id = u.id
+       WHERE s.twilio_phone = $1`,
+      [To]
+    );
+
+    if (settingsResult.rows.length === 0) {
+      // Number not configured - play message and hang up
+      const twiml = new twilio.twiml.VoiceResponse();
+      twiml.say({ voice: 'alice' }, 'Sorry, this number is not configured. Please try again later.');
+      twiml.hangup();
+      return res.type('text/xml').send(twiml.toString());
+    }
+
+    const settings = settingsResult.rows[0];
+    const forwardingPhone = settings.forwarding_phone || settings.user_phone;
+
+    if (!forwardingPhone) {
+      // No forwarding number configured - play message
+      const twiml = new twilio.twiml.VoiceResponse();
+      twiml.say({ voice: 'alice' }, `Thank you for calling ${settings.practice_name || 'our practice'}. We are unable to take your call right now. Please leave a message or we will text you shortly.`);
+      twiml.hangup();
+      return res.type('text/xml').send(twiml.toString());
+    }
+
+    // Create TwiML to forward the call to the dentist's phone
+    const twiml = new twilio.twiml.VoiceResponse();
+
+    // Dial the dentist's phone with a timeout
+    // When call ends, status callback will fire and we'll know if it was missed
+    const dial = twiml.dial({
+      callerId: To, // Show the Twilio number as caller ID
+      timeout: 25,  // Ring for 25 seconds before giving up
+      action: `/api/twilio/voice/dial-status?originalFrom=${encodeURIComponent(From)}&twilioNumber=${encodeURIComponent(To)}`,
+      method: 'POST'
+    });
+
+    dial.number(forwardingPhone);
+
+    res.type('text/xml').send(twiml.toString());
+  } catch (error) {
+    console.error('Incoming voice call error:', error);
+    const twiml = new twilio.twiml.VoiceResponse();
+    twiml.say({ voice: 'alice' }, 'We are experiencing technical difficulties. Please try again later.');
+    twiml.hangup();
+    res.type('text/xml').send(twiml.toString());
+  }
+});
+
+// Twilio webhook - called after the dial attempt completes
+router.post('/voice/dial-status', async (req, res) => {
+  try {
+    const { DialCallStatus, CallSid } = req.body;
+    const originalFrom = req.query.originalFrom;
+    const twilioNumber = req.query.twilioNumber;
+
+    console.log(`Dial status: ${DialCallStatus} for call from ${originalFrom}`);
+
+    // If the call was NOT answered (missed), trigger SMS follow-up
+    if (['no-answer', 'busy', 'failed', 'canceled'].includes(DialCallStatus)) {
+      // Find user by Twilio phone number
+      const settingsResult = await query(
+        `SELECT s.*, u.id as user_id, u.practice_name
+         FROM settings s
+         JOIN users u ON s.user_id = u.id
+         WHERE s.twilio_phone = $1`,
+        [twilioNumber]
+      );
+
+      if (settingsResult.rows.length > 0) {
+        const settings = settingsResult.rows[0];
+
+        // Create missed call record
+        const callResult = await query(
+          `INSERT INTO calls (user_id, twilio_call_sid, caller_phone, status, is_missed, followup_status)
+           VALUES ($1, $2, $3, $4, true, 'pending')
+           RETURNING id`,
+          [settings.user_id, CallSid, originalFrom, DialCallStatus]
+        );
+
+        const callId = callResult.rows[0].id;
+
+        // Send SMS follow-up
+        if (settings.twilio_account_sid && settings.twilio_auth_token) {
+          const client = twilio(settings.twilio_account_sid, settings.twilio_auth_token);
+
+          const practiceName = settings.practice_name || 'our practice';
+          const followUpMessage = settings.ai_greeting ||
+            `Hi! We noticed we missed your call at ${practiceName}. How can we help you today? Reply to this message or let us know a good time to reach you.`;
+
+          try {
+            const message = await client.messages.create({
+              body: followUpMessage,
+              from: twilioNumber,
+              to: originalFrom
+            });
+
+            // Create conversation
+            const conversationResult = await query(
+              `INSERT INTO conversations (user_id, call_id, caller_phone, channel, direction, status)
+               VALUES ($1, $2, $3, 'sms', 'outbound', 'active')
+               RETURNING id`,
+              [settings.user_id, callId, originalFrom]
+            );
+
+            const conversationId = conversationResult.rows[0].id;
+
+            // Store the outgoing message
+            await query(
+              `INSERT INTO messages (conversation_id, sender, content, message_type, twilio_sid, delivered)
+               VALUES ($1, 'ai', $2, 'text', $3, true)`,
+              [conversationId, followUpMessage, message.sid]
+            );
+
+            // Update call with conversation link
+            await query(
+              `UPDATE calls SET conversation_id = $1, followup_status = 'in_progress', followup_attempts = 1, last_followup_at = NOW()
+               WHERE id = $2`,
+              [conversationId, callId]
+            );
+
+            // Create lead
+            await query(
+              `INSERT INTO leads (user_id, call_id, conversation_id, name, phone, status, source)
+               VALUES ($1, $2, $3, 'Unknown Caller', $4, 'new', 'missed_call')`,
+              [settings.user_id, callId, conversationId, originalFrom]
+            );
+
+            console.log(`SMS follow-up sent to ${originalFrom}`);
+          } catch (smsError) {
+            console.error('Failed to send SMS follow-up:', smsError);
+          }
+        }
+      }
+
+      // Play a message to the caller before hanging up
+      const twiml = new twilio.twiml.VoiceResponse();
+      twiml.say({ voice: 'alice' }, 'We missed your call but will text you shortly. Goodbye!');
+      twiml.hangup();
+      return res.type('text/xml').send(twiml.toString());
+    }
+
+    // Call was answered - just hang up gracefully
+    const twiml = new twilio.twiml.VoiceResponse();
+    res.type('text/xml').send(twiml.toString());
+  } catch (error) {
+    console.error('Dial status error:', error);
+    const twiml = new twilio.twiml.VoiceResponse();
+    res.type('text/xml').send(twiml.toString());
+  }
+});
 
 // Twilio webhook - handles incoming SMS messages (no auth required for webhooks)
 router.post('/sms/incoming', async (req, res) => {

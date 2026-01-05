@@ -99,6 +99,7 @@ export default function Settings() {
 
   const [settings, setSettings] = useState({
     twilioPhone: '',
+    forwardingPhone: '',
     twilioAccountSid: '',
     twilioAuthToken: '',
     notificationEmail: true,
@@ -128,6 +129,7 @@ export default function Settings() {
 
         setSettings({
           twilioPhone: settingsRes.data.settings.twilioPhone || '',
+          forwardingPhone: settingsRes.data.settings.forwardingPhone || '',
           twilioAccountSid: settingsRes.data.settings.twilioAccountSid || '',
           twilioAuthToken: '',
           notificationEmail: settingsRes.data.settings.notificationEmail,
@@ -195,8 +197,8 @@ export default function Settings() {
   }
 
   const handleSaveTwilio = async () => {
-    if (!settings.twilioPhone || !settings.twilioAccountSid || !settings.twilioAuthToken) {
-      setError('Please fill in all Twilio fields')
+    if (!settings.twilioPhone || !settings.twilioAccountSid) {
+      setError('Please fill in Twilio phone number and Account SID')
       return
     }
 
@@ -204,8 +206,9 @@ export default function Settings() {
     try {
       await settingsAPI.updateTwilio({
         twilioPhone: settings.twilioPhone,
+        forwardingPhone: settings.forwardingPhone,
         twilioAccountSid: settings.twilioAccountSid,
-        twilioAuthToken: settings.twilioAuthToken
+        twilioAuthToken: settings.twilioAuthToken // Optional on updates
       })
       setSuccess('Twilio settings saved successfully!')
       setSettings(s => ({ ...s, twilioAuthToken: '' }))
@@ -406,15 +409,29 @@ export default function Settings() {
             </div>
           </div>
 
-          <div className="input-group">
-            <label className="input-label">Twilio Phone Number</label>
-            <input
-              type="tel"
-              value={settings.twilioPhone}
-              onChange={(e) => setSettings({ ...settings, twilioPhone: e.target.value })}
-              className="input"
-              placeholder="+1234567890"
-            />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="input-group">
+              <label className="input-label">Twilio Phone Number</label>
+              <input
+                type="tel"
+                value={settings.twilioPhone}
+                onChange={(e) => setSettings({ ...settings, twilioPhone: e.target.value })}
+                className="input"
+                placeholder="+1234567890"
+              />
+              <p className="text-xs text-dark-500 mt-1">The Twilio number patients will call</p>
+            </div>
+            <div className="input-group">
+              <label className="input-label">Forward Calls To</label>
+              <input
+                type="tel"
+                value={settings.forwardingPhone || ''}
+                onChange={(e) => setSettings({ ...settings, forwardingPhone: e.target.value })}
+                className="input"
+                placeholder="+61414855294"
+              />
+              <p className="text-xs text-dark-500 mt-1">Your real phone - calls forward here</p>
+            </div>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="input-group">
