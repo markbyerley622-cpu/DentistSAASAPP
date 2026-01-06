@@ -194,7 +194,7 @@ router.post('/sms/incoming', async (req, res) => {
   try {
     const { MessageSid, From, To, Body } = req.body;
 
-    // Find user by Twilio phone number
+    // Find user by Twilio phone number (include business_hours for slot generation)
     const settingsResult = await query(
       `SELECT s.*, u.id as user_id, u.practice_name
        FROM settings s
@@ -241,8 +241,8 @@ router.post('/sms/incoming', async (req, res) => {
       [conversationId, Body, MessageSid]
     );
 
-    // Generate AI response (simplified - in production would use actual AI)
-    const aiResponse = generateAIResponse(Body, settings);
+    // Handle conversation with state machine
+    const aiResponse = await handleConversation(conversationId, Body, settings);
 
     // Store AI response
     await query(
@@ -488,46 +488,332 @@ router.post('/send-sms', async (req, res) => {
   }
 });
 
-// Helper function to generate AI response (simplified)
+// ============================================
+// SMS CONVERSATION STATE MACHINE
+// ============================================
+
+/**
+ * Detect user intent from their message
+ */
+function detectIntent(message) {
+  const lower = message.toLowerCase();
+
+  // Callback keywords
+  if (lower.includes('call') && (lower.includes('back') || lower.includes('me'))) {
+    return 'callback';
+  }
+  if (lower.includes('talk') || lower.includes('speak') || lower.includes('ring')) {
+    return 'callback';
+  }
+
+  // Appointment keywords
+  if (lower.includes('appointment') || lower.includes('schedule')) {
+    return 'appointment';
+  }
+  if (lower.includes('book') || lower.includes('come in') || lower.includes('visit')) {
+    return 'appointment';
+  }
+
+  // Time-related = probably appointment
+  if (lower.includes('time') || lower.includes('when') || lower.includes('available')) {
+    return 'appointment';
+  }
+
+  // Default to callback if unclear
+  return 'callback';
+}
+
+/**
+ * Parse time selection from message (1, 2, 3, etc.)
+ */
+function parseTimeSelection(message) {
+  const trimmed = message.trim();
+
+  // Direct number
+  const num = parseInt(trimmed);
+  if (num >= 1 && num <= 3) {
+    return num - 1; // Array index
+  }
+
+  // Word-based
+  const lower = trimmed.toLowerCase();
+  if (lower.includes('first') || lower === '1' || lower.includes('one')) return 0;
+  if (lower.includes('second') || lower === '2' || lower.includes('two')) return 1;
+  if (lower.includes('third') || lower === '3' || lower.includes('three')) return 2;
+
+  return -1; // Couldn't parse
+}
+
+/**
+ * Generate available time slots from business hours
+ */
+function getAvailableSlotsFromBusinessHours(businessHours, numSlots = 3) {
+  const slots = [];
+  const now = new Date();
+  let daysChecked = 0;
+
+  // Default business hours if not set
+  const defaultHours = {
+    monday: { enabled: true, open: '09:00', close: '17:00' },
+    tuesday: { enabled: true, open: '09:00', close: '17:00' },
+    wednesday: { enabled: true, open: '09:00', close: '17:00' },
+    thursday: { enabled: true, open: '09:00', close: '17:00' },
+    friday: { enabled: true, open: '09:00', close: '17:00' },
+    saturday: { enabled: false, open: '09:00', close: '13:00' },
+    sunday: { enabled: false, open: '09:00', close: '13:00' }
+  };
+
+  const hours = businessHours && Object.keys(businessHours).length > 0 ? businessHours : defaultHours;
+  const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+
+  while (slots.length < numSlots && daysChecked < 14) {
+    const checkDate = new Date(now);
+    checkDate.setDate(now.getDate() + daysChecked);
+
+    const dayName = dayNames[checkDate.getDay()];
+    const dayHours = hours[dayName];
+
+    if (dayHours && dayHours.enabled) {
+      const [openHour, openMin] = dayHours.open.split(':').map(Number);
+      const [closeHour, closeMin] = dayHours.close.split(':').map(Number);
+
+      // Generate morning and afternoon slots
+      const morningSlot = new Date(checkDate);
+      morningSlot.setHours(openHour, openMin, 0, 0);
+
+      const afternoonSlot = new Date(checkDate);
+      afternoonSlot.setHours(14, 0, 0, 0); // 2 PM
+
+      // Skip times in the past
+      const minTime = daysChecked === 0 ? new Date(now.getTime() + 60 * 60 * 1000) : morningSlot; // At least 1 hour from now
+
+      if (morningSlot >= minTime && slots.length < numSlots) {
+        slots.push(new Date(morningSlot));
+      }
+
+      if (afternoonSlot >= minTime && afternoonSlot.getHours() < closeHour && slots.length < numSlots) {
+        slots.push(new Date(afternoonSlot));
+      }
+    }
+
+    daysChecked++;
+  }
+
+  return slots;
+}
+
+/**
+ * Format slots for SMS message
+ */
+function formatSlotsForSMS(slots) {
+  return slots.map((slot, i) => {
+    const day = slot.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+    const time = slot.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+    return `${i + 1}. ${day} at ${time}`;
+  }).join('\n');
+}
+
+/**
+ * Main conversation handler - state machine
+ */
+async function handleConversation(conversationId, incomingMessage, settings) {
+  const practiceName = settings.practice_name || 'Our Practice';
+
+  // Get conversation state
+  const convResult = await query(
+    `SELECT * FROM conversations WHERE id = $1`,
+    [conversationId]
+  );
+
+  if (convResult.rows.length === 0) {
+    return `Thanks for your message! How can we help you today?`;
+  }
+
+  const conversation = convResult.rows[0];
+  const currentStatus = conversation.status;
+  const lower = incomingMessage.toLowerCase();
+
+  // Handle based on current state
+  switch (currentStatus) {
+    case 'active':
+    case 'awaiting_response': {
+      // First response - detect intent and offer times
+      const intent = detectIntent(incomingMessage);
+
+      // Get available slots from business hours
+      const businessHours = settings.business_hours || {};
+      const slots = getAvailableSlotsFromBusinessHours(businessHours, 3);
+
+      if (slots.length === 0) {
+        // No available times
+        await query(
+          `UPDATE conversations SET status = 'callback_requested' WHERE id = $1`,
+          [conversationId]
+        );
+
+        // Update lead
+        await query(
+          `UPDATE leads SET status = 'qualified', preferred_time = 'Callback requested' WHERE conversation_id = $1`,
+          [conversationId]
+        );
+
+        return `Thanks for getting back to us! We're currently fully booked, but we'll have someone from ${practiceName} call you back shortly to find a time that works.`;
+      }
+
+      // Store suggested times and update status
+      await query(
+        `UPDATE conversations SET status = 'awaiting_time_selection' WHERE id = $1`,
+        [conversationId]
+      );
+
+      // Store the slots in a way we can retrieve them
+      await query(
+        `INSERT INTO messages (conversation_id, sender, content, message_type)
+         VALUES ($1, 'system', $2, 'system')`,
+        [conversationId, JSON.stringify({ suggested_times: slots, intent })]
+      );
+
+      // Update lead status
+      await query(
+        `UPDATE leads SET status = 'contacted', reason = $1 WHERE conversation_id = $2`,
+        [intent === 'callback' ? 'Wants callback' : 'Wants appointment', conversationId]
+      );
+
+      const actionText = intent === 'callback' ? 'call you back' : 'schedule you';
+      const formattedTimes = formatSlotsForSMS(slots);
+
+      return `Great! We can ${actionText} at any of these times. Just reply with the number:\n\n${formattedTimes}\n\nOr let us know a different time that works!`;
+    }
+
+    case 'awaiting_time_selection': {
+      // They're selecting a time
+      const selectedIndex = parseTimeSelection(incomingMessage);
+
+      // Get the suggested times from system message
+      const systemMsgResult = await query(
+        `SELECT content FROM messages
+         WHERE conversation_id = $1 AND message_type = 'system'
+         ORDER BY created_at DESC LIMIT 1`,
+        [conversationId]
+      );
+
+      if (systemMsgResult.rows.length === 0) {
+        // No suggested times found, restart
+        await query(
+          `UPDATE conversations SET status = 'active' WHERE id = $1`,
+          [conversationId]
+        );
+        return `Sorry, something went wrong. Would you like us to call you back, or would you prefer to schedule an appointment?`;
+      }
+
+      const systemData = JSON.parse(systemMsgResult.rows[0].content);
+      const suggestedTimes = systemData.suggested_times.map(t => new Date(t));
+      const intent = systemData.intent || 'appointment';
+
+      if (selectedIndex === -1 || selectedIndex >= suggestedTimes.length) {
+        // Check if they want a different time or callback
+        if (lower.includes('different') || lower.includes('other') || lower.includes('none')) {
+          await query(
+            `UPDATE conversations SET status = 'callback_requested' WHERE id = $1`,
+            [conversationId]
+          );
+
+          await query(
+            `UPDATE leads SET status = 'qualified', preferred_time = 'Requested different time' WHERE conversation_id = $1`,
+            [conversationId]
+          );
+
+          return `No problem! We'll have someone from ${practiceName} call you to find a time that works better. What's the best time to reach you?`;
+        }
+
+        // Didn't understand
+        const formattedTimes = formatSlotsForSMS(suggestedTimes);
+        return `I didn't catch which time you'd prefer. Could you reply with 1, 2, or 3?\n\n${formattedTimes}`;
+      }
+
+      // Valid selection!
+      const selectedTime = suggestedTimes[selectedIndex];
+      const formattedTime = selectedTime.toLocaleString('en-US', {
+        weekday: 'long',
+        month: 'long',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+        hour12: true
+      });
+
+      // Update conversation to booked
+      await query(
+        `UPDATE conversations SET status = 'appointment_booked', ended_at = NOW() WHERE id = $1`,
+        [conversationId]
+      );
+
+      // Update lead to converted with appointment time
+      await query(
+        `UPDATE leads
+         SET status = 'converted',
+             appointment_booked = true,
+             appointment_time = $1,
+             reason = $2
+         WHERE conversation_id = $3`,
+        [formattedTime, intent === 'callback' ? 'Callback scheduled' : 'Appointment scheduled', conversationId]
+      );
+
+      // Create appointment record
+      await query(
+        `INSERT INTO appointments (user_id, lead_id, patient_phone, appointment_date, appointment_time, reason, status)
+         SELECT c.user_id, l.id, c.caller_phone, $1::date, $2, $3, 'scheduled'
+         FROM conversations c
+         LEFT JOIN leads l ON l.conversation_id = c.id
+         WHERE c.id = $4`,
+        [selectedTime.toISOString().split('T')[0], selectedTime.toTimeString().slice(0,5), intent, conversationId]
+      );
+
+      if (settings.booking_mode === 'auto') {
+        return `Perfect! You're all set for ${formattedTime}. We look forward to seeing you at ${practiceName}!`;
+      } else {
+        return `Thanks! We've noted your preference for ${formattedTime}. Our team at ${practiceName} will confirm with you shortly!`;
+      }
+    }
+
+    case 'appointment_booked': {
+      // Already booked
+      if (lower.includes('cancel') || lower.includes('change') || lower.includes('reschedule')) {
+        return `No problem! Please call ${practiceName} directly to make changes to your appointment, or reply here and we'll have someone call you back.`;
+      }
+      return `Thanks for your message! You already have an appointment scheduled. Is there anything else we can help you with?`;
+    }
+
+    case 'callback_requested': {
+      // They wanted a callback - just acknowledge
+      if (lower.includes('thank')) {
+        return `You're welcome! Someone from ${practiceName} will be in touch soon.`;
+      }
+      return `Thanks! We've noted your message. Someone from ${practiceName} will call you back as soon as possible.`;
+    }
+
+    default: {
+      // Unknown state - offer help
+      return `Thanks for your message! Would you like us to call you back, or would you prefer to schedule an appointment? Just let us know!`;
+    }
+  }
+}
+
+// Legacy simple response function (fallback)
 function generateAIResponse(incomingMessage, settings) {
   const lowerMessage = incomingMessage.toLowerCase();
   const practiceName = settings.practice_name || 'our practice';
 
-  // Simple keyword-based responses (in production, use actual AI/NLP)
-  if (lowerMessage.includes('appointment') || lowerMessage.includes('book') || lowerMessage.includes('schedule')) {
-    return `Great! We'd love to schedule an appointment for you at ${practiceName}. What day and time works best for you? Our hours are Monday-Friday 9am-5pm.`;
-  }
-
-  if (lowerMessage.includes('cancel') || lowerMessage.includes('reschedule')) {
-    return `No problem! I can help you with that. Please provide your name and the date of your current appointment, and we'll take care of it.`;
-  }
-
   if (lowerMessage.includes('emergency') || lowerMessage.includes('pain') || lowerMessage.includes('urgent')) {
-    return `I'm sorry to hear you're in discomfort. For dental emergencies, please call our office directly. If it's after hours and you're experiencing severe pain, please visit your nearest emergency room.`;
-  }
-
-  if (lowerMessage.includes('cost') || lowerMessage.includes('price') || lowerMessage.includes('insurance')) {
-    return `For questions about costs and insurance, our front desk team can provide detailed information. Would you like us to have someone call you back, or would you prefer to schedule a consultation?`;
-  }
-
-  if (lowerMessage.includes('hours') || lowerMessage.includes('open')) {
-    return `${practiceName} is open Monday through Friday, 9am to 5pm. Would you like to schedule an appointment?`;
-  }
-
-  if (lowerMessage.includes('yes') || lowerMessage.includes('sure') || lowerMessage.includes('okay')) {
-    return `Perfect! What day and time works best for you? We have availability throughout the week.`;
-  }
-
-  if (lowerMessage.includes('no') || lowerMessage.includes('not now') || lowerMessage.includes('later')) {
-    return `No problem at all! Feel free to text us anytime when you're ready to schedule. We're here to help!`;
+    return `I'm sorry to hear you're in discomfort. For dental emergencies, please call ${practiceName} directly. If it's after hours and you're experiencing severe pain, please visit your nearest emergency room.`;
   }
 
   if (lowerMessage.includes('thank')) {
     return `You're welcome! Is there anything else I can help you with today?`;
   }
 
-  // Default response
-  return `Thanks for your message! How can we assist you today? We can help with scheduling appointments, answering questions about our services, or connecting you with our team.`;
+  // Default - prompt for intent
+  return `Thanks for your message! Would you like us to call you back, or would you prefer to schedule an appointment? Just reply here!`;
 }
 
 module.exports = router;
