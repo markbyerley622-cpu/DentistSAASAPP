@@ -2,10 +2,32 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const twilio = require('twilio');
 const crypto = require('crypto');
+const rateLimit = require('express-rate-limit');
 const { query } = require('../db/config');
 const { generateToken, authenticate } = require('../middleware/auth');
 
 const router = express.Router();
+
+// Rate limiting for authentication endpoints to prevent brute force attacks
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // 5 attempts per window
+  message: { error: { message: 'Too many attempts. Please try again in 15 minutes.' } },
+  standardHeaders: true,
+  legacyHeaders: false,
+  // Skip rate limiting in development for easier testing
+  skip: () => process.env.NODE_ENV !== 'production'
+});
+
+// Stricter rate limit for password reset (OTP) to prevent SMS abuse
+const otpLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 3, // 3 OTP requests per hour per IP
+  message: { error: { message: 'Too many password reset requests. Please try again in an hour.' } },
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () => process.env.NODE_ENV !== 'production'
+});
 
 // Initialize Twilio client for OTP (uses platform credentials from env)
 const getTwilioClient = () => {
@@ -22,8 +44,35 @@ const generateOTP = () => {
   return crypto.randomInt(100000, 999999).toString();
 };
 
+/**
+ * Format phone number to E.164 format for Twilio
+ * Handles Australian numbers: +614xxxxxxxx or 04xxxxxxxx
+ */
+const formatPhoneForTwilio = (phone) => {
+  // Remove all non-digit characters except leading +
+  let cleaned = phone.replace(/[^\d+]/g, '');
+
+  // If already has +61, return as-is
+  if (cleaned.startsWith('+61')) {
+    return cleaned;
+  }
+
+  // If starts with +, assume valid international format
+  if (cleaned.startsWith('+')) {
+    return cleaned;
+  }
+
+  // Remove leading zero (04xx -> 4xx)
+  if (cleaned.startsWith('0')) {
+    cleaned = cleaned.substring(1);
+  }
+
+  // Add Australian country code
+  return `+61${cleaned}`;
+};
+
 // POST /api/auth/register
-router.post('/register', async (req, res) => {
+router.post('/register', authLimiter, async (req, res) => {
   try {
     const { email, password, practiceName, phone, timezone } = req.body;
 
@@ -90,7 +139,7 @@ router.post('/register', async (req, res) => {
 });
 
 // POST /api/auth/login
-router.post('/login', async (req, res) => {
+router.post('/login', authLimiter, async (req, res) => {
   try {
     const { email, password } = req.body;
 
@@ -237,7 +286,7 @@ router.put('/password', authenticate, async (req, res) => {
 });
 
 // POST /api/auth/forgot-password - Request OTP for password reset
-router.post('/forgot-password', async (req, res) => {
+router.post('/forgot-password', otpLimiter, async (req, res) => {
   try {
     const { phone } = req.body;
 
@@ -286,11 +335,13 @@ router.post('/forgot-password', async (req, res) => {
 
     if (twilioClient && twilioPhone) {
       try {
+        const formattedPhone = formatPhoneForTwilio(cleanPhone);
         await twilioClient.messages.create({
           body: `Your SmileDesk verification code is: ${otp}. This code expires in 10 minutes.`,
           from: twilioPhone,
-          to: `+1${cleanPhone}` // Assuming US numbers, adjust as needed
+          to: formattedPhone
         });
+        console.log(`OTP sent to ${formattedPhone}`);
       } catch (twilioError) {
         console.error('Twilio SMS error:', twilioError);
         // Don't fail the request, just log the error
@@ -311,7 +362,7 @@ router.post('/forgot-password', async (req, res) => {
 });
 
 // POST /api/auth/verify-otp - Verify OTP and get reset token
-router.post('/verify-otp', async (req, res) => {
+router.post('/verify-otp', authLimiter, async (req, res) => {
   try {
     const { phone, code } = req.body;
 
@@ -379,7 +430,7 @@ router.post('/verify-otp', async (req, res) => {
 });
 
 // POST /api/auth/reset-password - Reset password with token
-router.post('/reset-password', async (req, res) => {
+router.post('/reset-password', authLimiter, async (req, res) => {
   try {
     const { phone, resetToken, newPassword } = req.body;
 

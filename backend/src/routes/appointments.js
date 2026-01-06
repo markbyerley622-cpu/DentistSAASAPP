@@ -1,5 +1,5 @@
 const express = require('express');
-const { query } = require('../db/config');
+const { query, getClient } = require('../db/config');
 const { authenticate } = require('../middleware/auth');
 
 const router = express.Router();
@@ -216,6 +216,8 @@ router.get('/:id', async (req, res) => {
 
 // POST /api/appointments - Create a new appointment
 router.post('/', async (req, res) => {
+  const client = await getClient();
+
   try {
     const userId = req.user.id;
     const {
@@ -232,28 +234,36 @@ router.post('/', async (req, res) => {
     } = req.body;
 
     if (!patientName || !patientPhone || !appointmentDate || !appointmentTime) {
+      client.release();
       return res.status(400).json({
         error: { message: 'Patient name, phone, date, and time are required' }
       });
     }
 
-    // Check for conflicting appointment
-    const conflict = await query(
+    // Start transaction with SERIALIZABLE isolation to prevent race conditions
+    await client.query('BEGIN');
+    await client.query('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE');
+
+    // Check for conflicting appointment with row lock
+    const conflict = await client.query(
       `SELECT id FROM appointments
        WHERE user_id = $1
          AND appointment_date = $2
          AND appointment_time = $3
-         AND status != 'cancelled'`,
+         AND status != 'cancelled'
+       FOR UPDATE`,
       [userId, appointmentDate, appointmentTime]
     );
 
     if (conflict.rows.length > 0) {
+      await client.query('ROLLBACK');
+      client.release();
       return res.status(409).json({
         error: { message: 'This time slot is already booked' }
       });
     }
 
-    const result = await query(
+    const result = await client.query(
       `INSERT INTO appointments (
         user_id, patient_name, patient_phone, patient_email,
         appointment_date, appointment_time, duration_minutes,
@@ -269,7 +279,7 @@ router.post('/', async (req, res) => {
 
     // If linked to a lead, update lead status
     if (leadId) {
-      await query(
+      await client.query(
         `UPDATE leads
          SET status = 'converted',
              appointment_booked = true,
@@ -282,11 +292,13 @@ router.post('/', async (req, res) => {
 
     // If linked to a conversation, update conversation status
     if (conversationId) {
-      await query(
+      await client.query(
         `UPDATE conversations SET status = 'appointment_booked' WHERE id = $1`,
         [conversationId]
       );
     }
+
+    await client.query('COMMIT');
 
     const apt = result.rows[0];
 
@@ -302,8 +314,19 @@ router.post('/', async (req, res) => {
       }
     });
   } catch (error) {
+    await client.query('ROLLBACK');
     console.error('Create appointment error:', error);
+
+    // Handle serialization failure (concurrent transaction conflict)
+    if (error.code === '40001') {
+      return res.status(409).json({
+        error: { message: 'This time slot was just booked. Please try another time.' }
+      });
+    }
+
     res.status(500).json({ error: { message: 'Failed to create appointment' } });
+  } finally {
+    client.release();
   }
 });
 

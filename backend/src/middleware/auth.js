@@ -1,17 +1,25 @@
 const jwt = require('jsonwebtoken');
 const { query } = require('../db/config');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-in-production';
+// Require JWT_SECRET in production - fail fast if not set
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET && process.env.NODE_ENV === 'production') {
+  console.error('FATAL: JWT_SECRET environment variable is required in production');
+  process.exit(1);
+}
+
+// Use a development-only fallback (never used in production due to check above)
+const SECRET = JWT_SECRET || 'dev-only-secret-not-for-production';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
 
 // Generate JWT token
 const generateToken = (userId) => {
-  return jwt.sign({ userId }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+  return jwt.sign({ userId }, SECRET, { expiresIn: JWT_EXPIRES_IN });
 };
 
 // Verify JWT token
 const verifyToken = (token) => {
-  return jwt.verify(token, JWT_SECRET);
+  return jwt.verify(token, SECRET);
 };
 
 // Auth middleware - protects routes
@@ -87,6 +95,5 @@ module.exports = {
   generateToken,
   verifyToken,
   authenticate,
-  optionalAuth,
-  JWT_SECRET
+  optionalAuth
 };

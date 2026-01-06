@@ -1,9 +1,120 @@
 const express = require('express');
 const twilio = require('twilio');
-const { query } = require('../db/config');
+const crypto = require('crypto');
+const { query, getClient } = require('../db/config');
 const { authenticate } = require('../middleware/auth');
 
+// Decryption for Twilio auth tokens (must match settings.js encryption)
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'dev-only-32-char-key-not-prod!!';
+const IV_LENGTH = 16;
+
+function decryptAuthToken(text) {
+  if (!text) return null;
+  try {
+    // Check if it's encrypted (contains colon separator)
+    if (!text.includes(':')) {
+      // Not encrypted (legacy data), return as-is
+      return text;
+    }
+    const textParts = text.split(':');
+    const iv = Buffer.from(textParts.shift(), 'hex');
+    const encryptedText = Buffer.from(textParts.join(':'), 'hex');
+    const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(ENCRYPTION_KEY), iv);
+    let decrypted = decipher.update(encryptedText);
+    decrypted = Buffer.concat([decrypted, decipher.final()]);
+    return decrypted.toString();
+  } catch (error) {
+    console.error('Auth token decryption error:', error.message);
+    // Return original text if decryption fails (legacy unencrypted data)
+    return text;
+  }
+}
+
 const router = express.Router();
+
+/**
+ * Twilio Webhook Signature Validation Middleware
+ * Validates that incoming webhook requests are actually from Twilio
+ * by checking the X-Twilio-Signature header against the request body
+ */
+async function validateTwilioWebhook(req, res, next) {
+  try {
+    const signature = req.headers['x-twilio-signature'];
+
+    // In development, skip validation if no signature (for testing)
+    if (process.env.NODE_ENV !== 'production' && !signature) {
+      console.log('[DEV] Skipping Twilio signature validation');
+      return next();
+    }
+
+    if (!signature) {
+      console.error('Missing X-Twilio-Signature header');
+      return res.status(403).send('Forbidden: Missing signature');
+    }
+
+    // Get the Twilio number from request (To for incoming, could also be From for outgoing status)
+    const twilioNumber = req.body.To || req.body.From || req.query.twilioNumber;
+
+    if (!twilioNumber) {
+      console.error('No Twilio number found in request');
+      return res.status(400).send('Bad Request: Missing phone number');
+    }
+
+    // Look up the auth token for this Twilio number
+    const settingsResult = await query(
+      'SELECT twilio_auth_token FROM settings WHERE twilio_phone = $1',
+      [twilioNumber]
+    );
+
+    // Also try the twilioNumber from query params (for dial-status callbacks)
+    let encryptedAuthToken = settingsResult.rows[0]?.twilio_auth_token;
+
+    if (!encryptedAuthToken && req.query.twilioNumber) {
+      const altResult = await query(
+        'SELECT twilio_auth_token FROM settings WHERE twilio_phone = $1',
+        [req.query.twilioNumber]
+      );
+      encryptedAuthToken = altResult.rows[0]?.twilio_auth_token;
+    }
+
+    if (!encryptedAuthToken) {
+      console.error('No auth token found for Twilio number:', twilioNumber);
+      // Allow request to proceed - the handler will return appropriate error
+      return next();
+    }
+
+    // Decrypt the auth token
+    const authToken = decryptAuthToken(encryptedAuthToken);
+
+    // Build the full URL that Twilio used to sign the request
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+    const host = req.headers['host'];
+    const originalUrl = req.originalUrl;
+    const url = `${protocol}://${host}${originalUrl}`;
+
+    // Validate the signature
+    const isValid = twilio.validateRequest(
+      authToken,
+      signature,
+      url,
+      req.body
+    );
+
+    if (!isValid) {
+      console.error('Invalid Twilio signature for URL:', url);
+      return res.status(403).send('Forbidden: Invalid signature');
+    }
+
+    next();
+  } catch (error) {
+    console.error('Twilio webhook validation error:', error);
+    // In case of validation errors, reject the request in production
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(500).send('Validation error');
+    }
+    next();
+  }
+}
 
 /**
  * SmileDesk Twilio Integration - SMS Only
@@ -28,7 +139,7 @@ const router = express.Router();
  */
 
 // Twilio webhook - handles incoming VOICE calls (forwards to dentist's phone)
-router.post('/voice/incoming', async (req, res) => {
+router.post('/voice/incoming', validateTwilioWebhook, async (req, res) => {
   try {
     const { CallSid, From, To, CallStatus } = req.body;
 
@@ -87,7 +198,7 @@ router.post('/voice/incoming', async (req, res) => {
 });
 
 // Twilio webhook - called after the dial attempt completes
-router.post('/voice/dial-status', async (req, res) => {
+router.post('/voice/dial-status', validateTwilioWebhook, async (req, res) => {
   try {
     const { DialCallStatus, CallSid } = req.body;
     const originalFrom = req.query.originalFrom;
@@ -150,15 +261,15 @@ async function canSendSMS(userId, callerPhone) {
      WHERE user_id = $1
        AND caller_phone = $2
        AND channel = 'sms'
-       AND created_at > NOW() - INTERVAL '${SMS_COOLDOWN_MINUTES} minutes'
+       AND created_at > NOW() - INTERVAL '1 minute' * $3
      LIMIT 1`,
-    [userId, callerPhone]
+    [userId, callerPhone, SMS_COOLDOWN_MINUTES]
   );
   return result.rows.length === 0; // Can send if no recent conversation
 }
 
 // Twilio webhook - called after voicemail recording completes (or caller hangs up)
-router.post('/voice/voicemail-complete', async (req, res) => {
+router.post('/voice/voicemail-complete', validateTwilioWebhook, async (req, res) => {
   try {
     const { RecordingUrl, RecordingDuration, RecordingSid } = req.body;
     const originalFrom = req.query.originalFrom;
@@ -249,7 +360,8 @@ router.post('/voice/voicemail-complete', async (req, res) => {
     console.log(`No voicemail, no cooldown - sending SMS follow-up to ${originalFrom}`);
 
     if (settings.twilio_account_sid && settings.twilio_auth_token) {
-      const client = twilio(settings.twilio_account_sid, settings.twilio_auth_token);
+      const decryptedToken = decryptAuthToken(settings.twilio_auth_token);
+      const client = twilio(settings.twilio_account_sid, decryptedToken);
 
       const practiceName = settings.practice_name || 'our practice';
       const followUpMessage = settings.ai_greeting ||
@@ -313,8 +425,8 @@ router.post('/voice/voicemail-complete', async (req, res) => {
   }
 });
 
-// Twilio webhook - handles incoming SMS messages (no auth required for webhooks)
-router.post('/sms/incoming', async (req, res) => {
+// Twilio webhook - handles incoming SMS messages
+router.post('/sms/incoming', validateTwilioWebhook, async (req, res) => {
   try {
     const { MessageSid, From, To, Body } = req.body;
 
@@ -389,7 +501,7 @@ router.post('/sms/incoming', async (req, res) => {
 });
 
 // Twilio webhook - handles missed calls (triggers SMS follow-up)
-router.post('/call/missed', async (req, res) => {
+router.post('/call/missed', validateTwilioWebhook, async (req, res) => {
   try {
     const { CallSid, From, To, CallStatus } = req.body;
 
@@ -440,7 +552,8 @@ router.post('/call/missed', async (req, res) => {
 
     // Send SMS follow-up using Twilio client
     if (settings.twilio_account_sid && settings.twilio_auth_token) {
-      const client = twilio(settings.twilio_account_sid, settings.twilio_auth_token);
+      const decryptedToken = decryptAuthToken(settings.twilio_auth_token);
+      const client = twilio(settings.twilio_account_sid, decryptedToken);
 
       const message = await client.messages.create({
         body: followUpMessage,
@@ -478,7 +591,7 @@ router.post('/call/missed', async (req, res) => {
 });
 
 // SMS delivery status callback
-router.post('/sms/status', async (req, res) => {
+router.post('/sms/status', validateTwilioWebhook, async (req, res) => {
   try {
     const { MessageSid, MessageStatus, ErrorCode, ErrorMessage } = req.body;
 
@@ -500,7 +613,7 @@ router.post('/sms/status', async (req, res) => {
 });
 
 // Call status callback (for tracking missed calls)
-router.post('/call/status', async (req, res) => {
+router.post('/call/status', validateTwilioWebhook, async (req, res) => {
   try {
     const { CallSid, CallStatus, CallDuration } = req.body;
 
@@ -542,7 +655,8 @@ router.post('/test', async (req, res) => {
     }
 
     // Test Twilio connection
-    const client = twilio(settings.twilio_account_sid, settings.twilio_auth_token);
+    const decryptedToken = decryptAuthToken(settings.twilio_auth_token);
+    const client = twilio(settings.twilio_account_sid, decryptedToken);
 
     try {
       const account = await client.api.accounts(settings.twilio_account_sid).fetch();
@@ -584,7 +698,8 @@ router.post('/send-sms', async (req, res) => {
     }
 
     const settings = settingsResult.rows[0];
-    const client = twilio(settings.twilio_account_sid, settings.twilio_auth_token);
+    const decryptedToken = decryptAuthToken(settings.twilio_auth_token);
+    const client = twilio(settings.twilio_account_sid, decryptedToken);
 
     const sentMessage = await client.messages.create({
       body: message,
@@ -970,87 +1085,113 @@ async function handleConversation(conversationId, incomingMessage, settings) {
       const appointmentDate = selectedTime.toISOString().split('T')[0];
       const appointmentTime = selectedTime.toTimeString().slice(0, 5);
 
-      // Check for double booking - is this slot already taken?
-      const existingBooking = await query(
-        `SELECT id FROM appointments
-         WHERE user_id = $1
-           AND appointment_date = $2::date
-           AND appointment_time = $3
-           AND status NOT IN ('cancelled', 'no_show')
-         LIMIT 1`,
-        [settings.user_id, appointmentDate, appointmentTime]
-      );
+      // Use transaction to prevent race conditions in appointment booking
+      const client = await getClient();
 
-      if (existingBooking.rows.length > 0) {
-        // Slot is taken! Find next available slot
-        console.log(`Double booking prevented for ${appointmentDate} ${appointmentTime}`);
+      try {
+        await client.query('BEGIN');
+        await client.query('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE');
 
-        const nextSlot = await findNextAvailableSlot(settings.user_id, selectedTime, settings.business_hours);
+        // Check for double booking with row lock
+        const existingBooking = await client.query(
+          `SELECT id FROM appointments
+           WHERE user_id = $1
+             AND appointment_date = $2::date
+             AND appointment_time = $3
+             AND status NOT IN ('cancelled', 'no_show')
+           FOR UPDATE`,
+          [settings.user_id, appointmentDate, appointmentTime]
+        );
 
-        if (nextSlot) {
-          const nextFormatted = nextSlot.toLocaleString('en-US', {
-            weekday: 'long',
-            month: 'long',
-            day: 'numeric',
-            hour: 'numeric',
-            minute: '2-digit',
-            hour12: true
-          });
+        if (existingBooking.rows.length > 0) {
+          // Slot is taken! Rollback and find next available slot
+          await client.query('ROLLBACK');
+          client.release();
 
-          // Store the new suggested time for next response
-          await query(
-            `UPDATE messages SET content = $1
-             WHERE conversation_id = $2 AND message_type = 'system'
-             ORDER BY created_at DESC LIMIT 1`,
-            [JSON.stringify({ suggested_times: [nextSlot], intent, original_choice_taken: true }), conversationId]
-          );
+          console.log(`Double booking prevented for ${appointmentDate} ${appointmentTime}`);
 
-          return `Sorry, that time was just booked! The next available slot is ${nextFormatted}. Reply YES to confirm, or let us know another time that works.`;
-        } else {
-          return `Sorry, that time was just booked and we're quite full. We'll have someone call you to find a time that works.`;
+          const nextSlot = await findNextAvailableSlot(settings.user_id, selectedTime, settings.business_hours);
+
+          if (nextSlot) {
+            const nextFormatted = nextSlot.toLocaleString('en-US', {
+              weekday: 'long',
+              month: 'long',
+              day: 'numeric',
+              hour: 'numeric',
+              minute: '2-digit',
+              hour12: true
+            });
+
+            // Store the new suggested time for next response
+            await query(
+              `UPDATE messages SET content = $1
+               WHERE conversation_id = $2 AND message_type = 'system'
+               ORDER BY created_at DESC LIMIT 1`,
+              [JSON.stringify({ suggested_times: [nextSlot], intent, original_choice_taken: true }), conversationId]
+            );
+
+            return `Sorry, that time was just booked! The next available slot is ${nextFormatted}. Reply YES to confirm, or let us know another time that works.`;
+          } else {
+            return `Sorry, that time was just booked and we're quite full. We'll have someone call you to find a time that works.`;
+          }
         }
-      }
 
-      const formattedTime = selectedTime.toLocaleString('en-US', {
-        weekday: 'long',
-        month: 'long',
-        day: 'numeric',
-        hour: 'numeric',
-        minute: '2-digit',
-        hour12: true
-      });
+        const formattedTime = selectedTime.toLocaleString('en-US', {
+          weekday: 'long',
+          month: 'long',
+          day: 'numeric',
+          hour: 'numeric',
+          minute: '2-digit',
+          hour12: true
+        });
 
-      // Update conversation to booked
-      await query(
-        `UPDATE conversations SET status = 'appointment_booked', ended_at = NOW() WHERE id = $1`,
-        [conversationId]
-      );
+        // Update conversation to booked
+        await client.query(
+          `UPDATE conversations SET status = 'appointment_booked', ended_at = NOW() WHERE id = $1`,
+          [conversationId]
+        );
 
-      // Update lead to converted with appointment time
-      await query(
-        `UPDATE leads
-         SET status = 'converted',
-             appointment_booked = true,
-             appointment_time = $1,
-             reason = $2
-         WHERE conversation_id = $3`,
-        [formattedTime, intent === 'callback' ? 'Callback scheduled' : 'Appointment scheduled', conversationId]
-      );
+        // Update lead to converted with appointment time
+        await client.query(
+          `UPDATE leads
+           SET status = 'converted',
+               appointment_booked = true,
+               appointment_time = $1,
+               reason = $2
+           WHERE conversation_id = $3`,
+          [formattedTime, intent === 'callback' ? 'Callback scheduled' : 'Appointment scheduled', conversationId]
+        );
 
-      // Create appointment record
-      await query(
-        `INSERT INTO appointments (user_id, lead_id, patient_phone, appointment_date, appointment_time, reason, status)
-         SELECT c.user_id, l.id, c.caller_phone, $1::date, $2, $3, 'scheduled'
-         FROM conversations c
-         LEFT JOIN leads l ON l.conversation_id = c.id
-         WHERE c.id = $4`,
-        [appointmentDate, appointmentTime, intent, conversationId]
-      );
+        // Create appointment record
+        await client.query(
+          `INSERT INTO appointments (user_id, lead_id, patient_phone, appointment_date, appointment_time, reason, status)
+           SELECT c.user_id, l.id, c.caller_phone, $1::date, $2, $3, 'scheduled'
+           FROM conversations c
+           LEFT JOIN leads l ON l.conversation_id = c.id
+           WHERE c.id = $4`,
+          [appointmentDate, appointmentTime, intent, conversationId]
+        );
 
-      if (settings.booking_mode === 'auto') {
-        return `Perfect! You're all set for ${formattedTime}. We look forward to seeing you at ${practiceName}!`;
-      } else {
-        return `Thanks! We've noted your preference for ${formattedTime}. Our team at ${practiceName} will confirm with you shortly!`;
+        await client.query('COMMIT');
+        client.release();
+
+        if (settings.booking_mode === 'auto') {
+          return `Perfect! You're all set for ${formattedTime}. We look forward to seeing you at ${practiceName}!`;
+        } else {
+          return `Thanks! We've noted your preference for ${formattedTime}. Our team at ${practiceName} will confirm with you shortly!`;
+        }
+      } catch (txError) {
+        await client.query('ROLLBACK');
+        client.release();
+
+        // Handle serialization failure (concurrent transaction conflict)
+        if (txError.code === '40001') {
+          console.log('Serialization conflict during appointment booking');
+          return `That time slot was just booked by someone else. Please reply with a different time or we can call you to schedule.`;
+        }
+
+        console.error('Transaction error in appointment booking:', txError);
+        return `We had a technical issue booking your appointment. Please reply again or call us directly.`;
       }
     }
 

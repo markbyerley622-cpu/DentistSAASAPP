@@ -1,8 +1,57 @@
 const express = require('express');
+const crypto = require('crypto');
 const { query } = require('../db/config');
 const { authenticate } = require('../middleware/auth');
 
 const router = express.Router();
+
+// Encryption key for Twilio credentials - require in production
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
+if (!ENCRYPTION_KEY && process.env.NODE_ENV === 'production') {
+  console.error('FATAL: ENCRYPTION_KEY environment variable is required in production for credential encryption');
+  process.exit(1);
+}
+
+// Use a development-only fallback (32 bytes for AES-256)
+const KEY = ENCRYPTION_KEY || 'dev-only-32-char-key-not-prod!!';
+const IV_LENGTH = 16;
+
+/**
+ * Encrypt sensitive data (Twilio auth token)
+ */
+function encrypt(text) {
+  if (!text) return null;
+  const iv = crypto.randomBytes(IV_LENGTH);
+  const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(KEY), iv);
+  let encrypted = cipher.update(text);
+  encrypted = Buffer.concat([encrypted, cipher.final()]);
+  return iv.toString('hex') + ':' + encrypted.toString('hex');
+}
+
+/**
+ * Decrypt sensitive data
+ */
+function decrypt(text) {
+  if (!text) return null;
+  try {
+    // Check if it's encrypted (contains colon separator)
+    if (!text.includes(':')) {
+      // Not encrypted (legacy data), return as-is
+      return text;
+    }
+    const textParts = text.split(':');
+    const iv = Buffer.from(textParts.shift(), 'hex');
+    const encryptedText = Buffer.from(textParts.join(':'), 'hex');
+    const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(KEY), iv);
+    let decrypted = decipher.update(encryptedText);
+    decrypted = Buffer.concat([decrypted, decipher.final()]);
+    return decrypted.toString();
+  } catch (error) {
+    console.error('Decryption error:', error.message);
+    // Return original text if decryption fails (legacy unencrypted data)
+    return text;
+  }
+}
 
 // Apply authentication to all routes
 router.use(authenticate);
@@ -48,6 +97,9 @@ router.put('/', async (req, res) => {
       aiGreeting
     } = req.body;
 
+    // Encrypt the auth token if provided
+    const encryptedAuthToken = twilioAuthToken ? encrypt(twilioAuthToken) : null;
+
     const result = await query(
       `UPDATE settings
        SET twilio_phone = COALESCE($1, twilio_phone),
@@ -63,7 +115,7 @@ router.put('/', async (req, res) => {
       [
         twilioPhone,
         twilioAccountSid,
-        twilioAuthToken,
+        encryptedAuthToken,
         notificationEmail,
         notificationSms,
         bookingMode,
@@ -101,6 +153,8 @@ router.put('/twilio', async (req, res) => {
     let params;
 
     if (twilioAuthToken) {
+      // Encrypt the auth token before storing
+      const encryptedAuthToken = encrypt(twilioAuthToken);
       updateQuery = `UPDATE settings
          SET twilio_phone = $1,
              forwarding_phone = $2,
@@ -108,7 +162,7 @@ router.put('/twilio', async (req, res) => {
              twilio_auth_token = $4
          WHERE user_id = $5
          RETURNING *`;
-      params = [twilioPhone, forwardingPhone || null, twilioAccountSid, twilioAuthToken, userId];
+      params = [twilioPhone, forwardingPhone || null, twilioAccountSid, encryptedAuthToken, userId];
     } else {
       updateQuery = `UPDATE settings
          SET twilio_phone = $1,
