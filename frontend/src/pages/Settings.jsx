@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
-import { settingsAPI, calendarAPI, authAPI, bookingSlotsAPI } from '../lib/api'
+import { settingsAPI, calendarAPI, authAPI } from '../lib/api'
 import {
   Settings as SettingsIcon,
   Building2,
@@ -16,10 +16,7 @@ import {
   Save,
   Loader2,
   Link2,
-  Unlink,
-  Plus,
-  Trash2,
-  CalendarClock
+  Unlink
 } from 'lucide-react'
 
 function SettingsSection({ title, description, icon: Icon, children }) {
@@ -112,17 +109,26 @@ export default function Settings() {
   const [calendarCredentialsConfigured, setCalendarCredentialsConfigured] = useState(false)
   const [googleCredentials, setGoogleCredentials] = useState({ clientId: '', clientSecret: '' })
   const [savingGoogleCredentials, setSavingGoogleCredentials] = useState(false)
-  const [bookingSlots, setBookingSlots] = useState([])
-  const [newSlot, setNewSlot] = useState({ day: 'monday', time: '' })
-  const [slotsLoading, setSlotsLoading] = useState(false)
+  const [savingBusinessHours, setSavingBusinessHours] = useState(false)
+
+  const defaultBusinessHours = {
+    monday: { enabled: true, open: '09:00', close: '17:00' },
+    tuesday: { enabled: true, open: '09:00', close: '17:00' },
+    wednesday: { enabled: true, open: '09:00', close: '17:00' },
+    thursday: { enabled: true, open: '09:00', close: '17:00' },
+    friday: { enabled: true, open: '09:00', close: '17:00' },
+    saturday: { enabled: false, open: '09:00', close: '13:00' },
+    sunday: { enabled: false, open: '09:00', close: '13:00' }
+  }
+
+  const [businessHours, setBusinessHours] = useState(defaultBusinessHours)
 
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const [settingsRes, calendarRes, slotsRes] = await Promise.all([
+        const [settingsRes, calendarRes] = await Promise.all([
           settingsAPI.get(),
-          calendarAPI.getStatus(),
-          bookingSlotsAPI.getAll()
+          calendarAPI.getStatus()
         ])
 
         setSettings({
@@ -137,9 +143,13 @@ export default function Settings() {
           businessHours: settingsRes.data.settings.businessHours || {}
         })
 
+        // Load business hours from settings or use defaults
+        if (settingsRes.data.settings.businessHours && Object.keys(settingsRes.data.settings.businessHours).length > 0) {
+          setBusinessHours(settingsRes.data.settings.businessHours)
+        }
+
         setCalendarConnected(calendarRes.data.connected)
         setCalendarCredentialsConfigured(calendarRes.data.credentialsConfigured || false)
-        setBookingSlots(slotsRes.data.slots || [])
 
         setProfile({
           practiceName: user?.practiceName || '',
@@ -281,6 +291,28 @@ export default function Settings() {
     }
   }
 
+  const handleSaveBusinessHours = async () => {
+    setSavingBusinessHours(true)
+    try {
+      await settingsAPI.updateBusinessHours({ businessHours })
+      setSuccess('Business hours saved!')
+    } catch (err) {
+      setError(err.response?.data?.error?.message || 'Failed to save business hours')
+    } finally {
+      setSavingBusinessHours(false)
+    }
+  }
+
+  const updateBusinessHoursDay = (day, field, value) => {
+    setBusinessHours(prev => ({
+      ...prev,
+      [day]: {
+        ...prev[day],
+        [field]: value
+      }
+    }))
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -374,7 +406,7 @@ export default function Settings() {
       {/* Twilio Phone Number */}
       <SettingsSection
         title="Your Twilio Number"
-        description="This is your dedicated patient line - add it to your VoIP system"
+        description="This is your dedicated patient line - add it to your phone system"
         icon={Phone}
       >
         <div className="space-y-4">
@@ -386,7 +418,7 @@ export default function Settings() {
               </div>
               <div className="p-3 rounded-lg bg-dark-800/50 border border-dark-700/50">
                 <p className="text-sm text-dark-300">
-                  Add this number to your VoIP system or give it to patients. Missed calls will trigger automatic SMS follow-ups.
+                  Add this number to your phone system or give it to patients. Missed calls will trigger automatic SMS follow-ups.
                 </p>
               </div>
             </>
@@ -671,116 +703,65 @@ export default function Settings() {
         </div>
       </SettingsSection>
 
-      {/* Available Booking Slots */}
+      {/* Business Hours */}
       <SettingsSection
-        title="Available Booking Slots"
-        description="Add time slots the AI can offer to patients (used when Google Calendar is not connected)"
-        icon={CalendarClock}
+        title="Business Hours"
+        description="Set your practice hours - the AI will offer appointments during these times"
+        icon={Clock}
       >
         <div className="space-y-4">
           {/* Info banner */}
           <div className="p-4 rounded-lg bg-accent-500/10 border border-accent-500/20">
             <p className="text-sm text-accent-300">
-              These slots will be offered by the AI when following up on missed calls. Add your available appointment times below.
+              {calendarConnected
+                ? "Google Calendar is connected - the AI will check your calendar for conflicts before offering times."
+                : "Set your open hours below. The AI will offer 30-minute appointment slots during these times."}
             </p>
           </div>
 
-          {/* Current slots */}
-          <div className="space-y-2">
-            {bookingSlots.map((slot) => (
+          {/* Days */}
+          <div className="space-y-3">
+            {['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'].map((day) => (
               <div
-                key={slot.id}
-                className="flex items-center justify-between p-3 rounded-lg bg-dark-800/50 border border-dark-700/50"
+                key={day}
+                className={`flex items-center gap-4 p-4 rounded-lg border transition-colors ${
+                  businessHours[day]?.enabled
+                    ? 'bg-dark-800/50 border-dark-700/50'
+                    : 'bg-dark-900/50 border-dark-800/50 opacity-60'
+                }`}
               >
-                <div className="flex items-center gap-3">
-                  <CalendarClock className="w-4 h-4 text-dark-400" />
-                  <span className="text-dark-200 font-medium capitalize">{slot.dayOfWeek}</span>
-                  <span className="text-dark-400">at</span>
-                  <span className="text-dark-200">{slot.timeSlot}</span>
-                </div>
-                <button
-                  onClick={async () => {
-                    try {
-                      await bookingSlotsAPI.delete(slot.id)
-                      setBookingSlots(bookingSlots.filter(s => s.id !== slot.id))
-                      setSuccess('Slot deleted')
-                    } catch (err) {
-                      setError('Failed to delete slot')
-                    }
-                  }}
-                  className="p-2 text-dark-500 hover:text-danger-400 hover:bg-danger-500/10 rounded-lg transition-colors"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
+                <Toggle
+                  checked={businessHours[day]?.enabled || false}
+                  onChange={(val) => updateBusinessHoursDay(day, 'enabled', val)}
+                />
+                <span className="w-24 font-medium text-dark-200 capitalize">{day}</span>
+                {businessHours[day]?.enabled ? (
+                  <div className="flex items-center gap-2 flex-1">
+                    <input
+                      type="time"
+                      value={businessHours[day]?.open || '09:00'}
+                      onChange={(e) => updateBusinessHoursDay(day, 'open', e.target.value)}
+                      className="input w-32"
+                    />
+                    <span className="text-dark-500">to</span>
+                    <input
+                      type="time"
+                      value={businessHours[day]?.close || '17:00'}
+                      onChange={(e) => updateBusinessHoursDay(day, 'close', e.target.value)}
+                      className="input w-32"
+                    />
+                  </div>
+                ) : (
+                  <span className="text-dark-500 text-sm">Closed</span>
+                )}
               </div>
             ))}
-            {bookingSlots.length === 0 && (
-              <div className="text-center py-6 text-dark-500">
-                <CalendarClock className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                <p>No booking slots added yet</p>
-              </div>
-            )}
           </div>
 
-          {/* Add new slot */}
-          <div className="flex flex-col sm:flex-row gap-3 pt-4 border-t border-dark-800">
-            <select
-              value={newSlot.day}
-              onChange={(e) => setNewSlot({ ...newSlot, day: e.target.value })}
-              className="input flex-1"
-            >
-              <option value="monday">Monday</option>
-              <option value="tuesday">Tuesday</option>
-              <option value="wednesday">Wednesday</option>
-              <option value="thursday">Thursday</option>
-              <option value="friday">Friday</option>
-              <option value="saturday">Saturday</option>
-              <option value="sunday">Sunday</option>
-            </select>
-            <input
-              type="text"
-              value={newSlot.time}
-              onChange={(e) => setNewSlot({ ...newSlot, time: e.target.value })}
-              className="input flex-1"
-              placeholder="e.g., 10:00 AM, 2:30 PM"
-            />
-            <button
-              onClick={async () => {
-                if (newSlot.time.trim()) {
-                  setSlotsLoading(true)
-                  try {
-                    const res = await bookingSlotsAPI.create({
-                      dayOfWeek: newSlot.day,
-                      timeSlot: newSlot.time
-                    })
-                    setBookingSlots([...bookingSlots, res.data.slot])
-                    setNewSlot({ day: 'monday', time: '' })
-                    setSuccess('Slot added successfully')
-                  } catch (err) {
-                    setError(err.response?.data?.error?.message || 'Failed to add slot')
-                  } finally {
-                    setSlotsLoading(false)
-                  }
-                }
-              }}
-              disabled={slotsLoading}
-              className="btn-primary flex items-center gap-2"
-            >
-              {slotsLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-              Add Slot
-            </button>
-          </div>
-
-          {/* Callback option */}
-          <div className="pt-4 border-t border-dark-800">
-            <label className="flex items-center justify-between p-4 rounded-lg bg-dark-800/50 cursor-pointer hover:bg-dark-800/70 transition-colors">
-              <div>
-                <p className="font-medium text-dark-200">Offer callback option</p>
-                <p className="text-sm text-dark-400">If no slots work, AI will offer to have you call them back</p>
-              </div>
-              <Toggle checked={true} onChange={() => {}} />
-            </label>
-          </div>
+          <button onClick={handleSaveBusinessHours} disabled={savingBusinessHours} className="btn-primary">
+            {savingBusinessHours ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+            <span className="ml-2">Save Business Hours</span>
+          </button>
         </div>
       </SettingsSection>
     </div>

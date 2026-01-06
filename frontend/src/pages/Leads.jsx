@@ -17,7 +17,9 @@ import {
   UserPlus,
   Filter,
   LayoutGrid,
-  List
+  List,
+  PhoneCall,
+  CalendarCheck
 } from 'lucide-react'
 
 const STATUS_CONFIG = {
@@ -79,6 +81,10 @@ function LeadCard({ lead, onClick }) {
     return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
   }
 
+  const wantsCallback = lead.preferredTime?.toLowerCase().includes('callback') ||
+                        lead.reason?.toLowerCase().includes('call back') ||
+                        lead.reason?.toLowerCase().includes('callback')
+
   return (
     <div
       onClick={() => onClick(lead)}
@@ -99,7 +105,23 @@ function LeadCard({ lead, onClick }) {
         <PriorityBadge priority={lead.priority} />
       </div>
 
-      {lead.reason && (
+      {/* Appointment time for booked leads */}
+      {lead.status === 'converted' && lead.appointmentTime && (
+        <div className="flex items-center gap-2 mb-3 p-2 rounded-lg bg-success-500/10 border border-success-500/20">
+          <CalendarCheck className="w-4 h-4 text-success-400" />
+          <span className="text-sm font-medium text-success-400">{lead.appointmentTime}</span>
+        </div>
+      )}
+
+      {/* Callback requested indicator */}
+      {wantsCallback && lead.status !== 'converted' && (
+        <div className="flex items-center gap-2 mb-3 p-2 rounded-lg bg-warning-500/10 border border-warning-500/20">
+          <PhoneCall className="w-4 h-4 text-warning-400" />
+          <span className="text-sm font-medium text-warning-400">Wants callback</span>
+        </div>
+      )}
+
+      {lead.reason && !wantsCallback && (
         <p className="text-sm text-dark-400 mb-3 line-clamp-2">{lead.reason}</p>
       )}
 
@@ -470,7 +492,7 @@ export default function Leads() {
                     Status
                   </th>
                   <th className="text-left px-6 py-4 text-xs font-medium text-dark-400 uppercase tracking-wider">
-                    Priority
+                    Appointment
                   </th>
                   <th className="text-left px-6 py-4 text-xs font-medium text-dark-400 uppercase tracking-wider">
                     Created
@@ -510,7 +532,20 @@ export default function Leads() {
                         <StatusBadge status={lead.status} />
                       </td>
                       <td className="px-6 py-4">
-                        <PriorityBadge priority={lead.priority} />
+                        {lead.status === 'converted' && lead.appointmentTime ? (
+                          <div className="flex items-center gap-2">
+                            <CalendarCheck className="w-4 h-4 text-success-400" />
+                            <span className="text-sm font-medium text-success-400">{lead.appointmentTime}</span>
+                          </div>
+                        ) : (lead.preferredTime?.toLowerCase().includes('callback') ||
+                              lead.reason?.toLowerCase().includes('callback')) ? (
+                          <div className="flex items-center gap-2">
+                            <PhoneCall className="w-4 h-4 text-warning-400" />
+                            <span className="text-sm text-warning-400">Wants callback</span>
+                          </div>
+                        ) : (
+                          <span className="text-sm text-dark-500">-</span>
+                        )}
                       </td>
                       <td className="px-6 py-4">
                         <span className="text-sm text-dark-400">
