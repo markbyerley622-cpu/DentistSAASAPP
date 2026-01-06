@@ -478,13 +478,14 @@ export default function Settings() {
             <label className="input-label">SMS Message</label>
             <textarea
               value={(() => {
-                const practiceName = user?.practiceName || 'our practice';
-                const defaultGreeting = `Hi! We noticed we missed your call at ${practiceName}. How can we help you today? Reply to this message or let us know a good time to reach you.`;
-                // If no greeting set, or it's the old generic default, use the personalized one
+                const practiceName = user?.practiceName || 'Our Practice';
+                const defaultGreeting = `Hi! This is ${practiceName}. We missed your call and want to make sure we help you. Would you like us to call you back, or would you prefer to schedule an appointment? Just reply here!`;
+                // If no greeting set, or it's an old default, use the new one
                 if (!settings.aiGreeting ||
                     settings.aiGreeting.includes('the dental practice') ||
                     settings.aiGreeting.includes('for the dental practice') ||
-                    settings.aiGreeting.includes('Thank you for calling')) {
+                    settings.aiGreeting.includes('Thank you for calling') ||
+                    settings.aiGreeting.includes('How can we help you today')) {
                   return defaultGreeting;
                 }
                 return settings.aiGreeting;
@@ -492,7 +493,7 @@ export default function Settings() {
               onChange={(e) => setSettings({ ...settings, aiGreeting: e.target.value })}
               rows={4}
               className="input resize-none"
-              placeholder={`Hi! We noticed we missed your call at ${user?.practiceName || 'our practice'}. How can we help you today? Reply to this message or let us know a good time to reach you.`}
+              placeholder={`Hi! This is ${user?.practiceName || 'Our Practice'}. We missed your call and want to make sure we help you. Would you like us to call you back, or would you prefer to schedule an appointment? Just reply here!`}
             />
             <p className="text-xs text-dark-500 mt-2">
               This is the SMS message sent when following up on missed calls
