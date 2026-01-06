@@ -95,9 +95,9 @@ router.post('/voice/dial-status', async (req, res) => {
 
     console.log(`Dial status: ${DialCallStatus} for call from ${originalFrom}`);
 
-    // If the call was NOT answered (missed), trigger SMS follow-up
+    // If the call was NOT answered (missed), offer voicemail
     if (['no-answer', 'busy', 'failed', 'canceled'].includes(DialCallStatus)) {
-      // Find user by Twilio phone number
+      // Find user by Twilio phone number to get practice name
       const settingsResult = await query(
         `SELECT s.*, u.id as user_id, u.practice_name
          FROM settings s
@@ -106,76 +106,25 @@ router.post('/voice/dial-status', async (req, res) => {
         [twilioNumber]
       );
 
-      if (settingsResult.rows.length > 0) {
-        const settings = settingsResult.rows[0];
+      const practiceName = settingsResult.rows.length > 0
+        ? settingsResult.rows[0].practice_name || 'our practice'
+        : 'our practice';
 
-        // Create missed call record
-        const callResult = await query(
-          `INSERT INTO calls (user_id, twilio_call_sid, caller_phone, status, is_missed, followup_status)
-           VALUES ($1, $2, $3, $4, true, 'pending')
-           RETURNING id`,
-          [settings.user_id, CallSid, originalFrom, DialCallStatus]
-        );
-
-        const callId = callResult.rows[0].id;
-
-        // Send SMS follow-up
-        if (settings.twilio_account_sid && settings.twilio_auth_token) {
-          const client = twilio(settings.twilio_account_sid, settings.twilio_auth_token);
-
-          const practiceName = settings.practice_name || 'our practice';
-          const followUpMessage = settings.ai_greeting ||
-            `Hi! This is ${practiceName}. We missed your call and want to make sure we help you. Reply 1 for us to call you back, or Reply 2 to schedule an appointment. Thanks!`;
-
-          try {
-            const message = await client.messages.create({
-              body: followUpMessage,
-              from: twilioNumber,
-              to: originalFrom
-            });
-
-            // Create conversation
-            const conversationResult = await query(
-              `INSERT INTO conversations (user_id, call_id, caller_phone, channel, direction, status)
-               VALUES ($1, $2, $3, 'sms', 'outbound', 'active')
-               RETURNING id`,
-              [settings.user_id, callId, originalFrom]
-            );
-
-            const conversationId = conversationResult.rows[0].id;
-
-            // Store the outgoing message
-            await query(
-              `INSERT INTO messages (conversation_id, sender, content, message_type, twilio_sid, delivered)
-               VALUES ($1, 'ai', $2, 'text', $3, true)`,
-              [conversationId, followUpMessage, message.sid]
-            );
-
-            // Update call with conversation link
-            await query(
-              `UPDATE calls SET conversation_id = $1, followup_status = 'in_progress', followup_attempts = 1, last_followup_at = NOW()
-               WHERE id = $2`,
-              [conversationId, callId]
-            );
-
-            // Create lead
-            await query(
-              `INSERT INTO leads (user_id, call_id, conversation_id, name, phone, status, source)
-               VALUES ($1, $2, $3, 'Unknown Caller', $4, 'new', 'missed_call')`,
-              [settings.user_id, callId, conversationId, originalFrom]
-            );
-
-            console.log(`SMS follow-up sent to ${originalFrom}`);
-          } catch (smsError) {
-            console.error('Failed to send SMS follow-up:', smsError);
-          }
-        }
-      }
-
-      // Play a message to the caller before hanging up
+      // Offer voicemail option - if they leave one, no SMS; if they hang up, send SMS
       const twiml = new twilio.twiml.VoiceResponse();
-      twiml.say({ voice: 'alice' }, 'We missed your call but will text you shortly. Goodbye!');
-      twiml.hangup();
+      twiml.say({ voice: 'alice' }, `Sorry we missed your call at ${practiceName}. Please leave a message after the beep, or simply hang up and we'll text you shortly.`);
+
+      // Record voicemail with callback to check if they actually left one
+      twiml.record({
+        action: `/api/twilio/voice/voicemail-complete?originalFrom=${encodeURIComponent(originalFrom)}&twilioNumber=${encodeURIComponent(twilioNumber)}&callSid=${encodeURIComponent(CallSid)}`,
+        method: 'POST',
+        maxLength: 120, // 2 minutes max
+        timeout: 5, // 5 seconds of silence = done
+        transcribe: false,
+        playBeep: true
+      });
+
+      // If they hang up before/during recording, this won't execute (Twilio calls the action URL)
       return res.type('text/xml').send(twiml.toString());
     }
 
@@ -185,6 +134,135 @@ router.post('/voice/dial-status', async (req, res) => {
   } catch (error) {
     console.error('Dial status error:', error);
     const twiml = new twilio.twiml.VoiceResponse();
+    res.type('text/xml').send(twiml.toString());
+  }
+});
+
+// Twilio webhook - called after voicemail recording completes (or caller hangs up)
+router.post('/voice/voicemail-complete', async (req, res) => {
+  try {
+    const { RecordingUrl, RecordingDuration, RecordingSid } = req.body;
+    const originalFrom = req.query.originalFrom;
+    const twilioNumber = req.query.twilioNumber;
+    const callSid = req.query.callSid;
+
+    const recordingDuration = parseInt(RecordingDuration) || 0;
+
+    console.log(`Voicemail complete from ${originalFrom}, duration: ${recordingDuration}s`);
+
+    // Find user by Twilio phone number
+    const settingsResult = await query(
+      `SELECT s.*, u.id as user_id, u.practice_name
+       FROM settings s
+       JOIN users u ON s.user_id = u.id
+       WHERE s.twilio_phone = $1`,
+      [twilioNumber]
+    );
+
+    if (settingsResult.rows.length === 0) {
+      const twiml = new twilio.twiml.VoiceResponse();
+      twiml.hangup();
+      return res.type('text/xml').send(twiml.toString());
+    }
+
+    const settings = settingsResult.rows[0];
+
+    // Create missed call record
+    const callResult = await query(
+      `INSERT INTO calls (user_id, twilio_call_sid, caller_phone, status, is_missed, followup_status, voicemail_url, voicemail_duration)
+       VALUES ($1, $2, $3, 'no-answer', true, $4, $5, $6)
+       RETURNING id`,
+      [
+        settings.user_id,
+        callSid,
+        originalFrom,
+        recordingDuration >= 3 ? 'voicemail_left' : 'pending',
+        RecordingUrl || null,
+        recordingDuration
+      ]
+    );
+
+    const callId = callResult.rows[0].id;
+
+    // Only send SMS if they did NOT leave a meaningful voicemail (less than 3 seconds)
+    if (recordingDuration < 3) {
+      console.log(`No voicemail left (${recordingDuration}s), sending SMS follow-up`);
+
+      if (settings.twilio_account_sid && settings.twilio_auth_token) {
+        const client = twilio(settings.twilio_account_sid, settings.twilio_auth_token);
+
+        const practiceName = settings.practice_name || 'our practice';
+        const followUpMessage = settings.ai_greeting ||
+          `Hi! This is ${practiceName}. We missed your call and want to make sure we help you. Reply 1 for us to call you back, or Reply 2 to schedule an appointment. Thanks!`;
+
+        try {
+          const message = await client.messages.create({
+            body: followUpMessage,
+            from: twilioNumber,
+            to: originalFrom
+          });
+
+          // Create conversation
+          const conversationResult = await query(
+            `INSERT INTO conversations (user_id, call_id, caller_phone, channel, direction, status)
+             VALUES ($1, $2, $3, 'sms', 'outbound', 'active')
+             RETURNING id`,
+            [settings.user_id, callId, originalFrom]
+          );
+
+          const conversationId = conversationResult.rows[0].id;
+
+          // Store the outgoing message
+          await query(
+            `INSERT INTO messages (conversation_id, sender, content, message_type, twilio_sid, delivered)
+             VALUES ($1, 'ai', $2, 'text', $3, true)`,
+            [conversationId, followUpMessage, message.sid]
+          );
+
+          // Update call with conversation link
+          await query(
+            `UPDATE calls SET conversation_id = $1, followup_status = 'in_progress', followup_attempts = 1, last_followup_at = NOW()
+             WHERE id = $2`,
+            [conversationId, callId]
+          );
+
+          // Create lead
+          await query(
+            `INSERT INTO leads (user_id, call_id, conversation_id, name, phone, status, source)
+             VALUES ($1, $2, $3, 'Unknown Caller', $4, 'new', 'missed_call')`,
+            [settings.user_id, callId, conversationId, originalFrom]
+          );
+
+          console.log(`SMS follow-up sent to ${originalFrom}`);
+        } catch (smsError) {
+          console.error('Failed to send SMS follow-up:', smsError);
+        }
+      }
+    } else {
+      console.log(`Voicemail left (${recordingDuration}s), NOT sending SMS`);
+
+      // Still create a lead for the voicemail
+      await query(
+        `INSERT INTO leads (user_id, call_id, name, phone, status, source, reason)
+         VALUES ($1, $2, 'Unknown Caller', $3, 'new', 'voicemail', 'Left voicemail')`,
+        [settings.user_id, callId, originalFrom]
+      );
+    }
+
+    // Thank them and hang up
+    const twiml = new twilio.twiml.VoiceResponse();
+    if (recordingDuration >= 3) {
+      twiml.say({ voice: 'alice' }, 'Thank you for your message. We will get back to you soon. Goodbye!');
+    } else {
+      twiml.say({ voice: 'alice' }, 'We will text you shortly. Goodbye!');
+    }
+    twiml.hangup();
+
+    res.type('text/xml').send(twiml.toString());
+  } catch (error) {
+    console.error('Voicemail complete error:', error);
+    const twiml = new twilio.twiml.VoiceResponse();
+    twiml.hangup();
     res.type('text/xml').send(twiml.toString());
   }
 });
