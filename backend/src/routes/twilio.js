@@ -138,6 +138,25 @@ router.post('/voice/dial-status', async (req, res) => {
   }
 });
 
+// SMS cooldown in minutes - don't spam the same caller
+const SMS_COOLDOWN_MINUTES = 30;
+
+/**
+ * Check if we recently sent an SMS to this phone number (cooldown)
+ */
+async function canSendSMS(userId, callerPhone) {
+  const result = await query(
+    `SELECT id FROM conversations
+     WHERE user_id = $1
+       AND caller_phone = $2
+       AND channel = 'sms'
+       AND created_at > NOW() - INTERVAL '${SMS_COOLDOWN_MINUTES} minutes'
+     LIMIT 1`,
+    [userId, callerPhone]
+  );
+  return result.rows.length === 0; // Can send if no recent conversation
+}
+
 // Twilio webhook - called after voicemail recording completes (or caller hangs up)
 router.post('/voice/voicemail-complete', async (req, res) => {
   try {
@@ -184,81 +203,108 @@ router.post('/voice/voicemail-complete', async (req, res) => {
 
     const callId = callResult.rows[0].id;
 
-    // Only send SMS if they did NOT leave a meaningful voicemail (less than 3 seconds)
-    if (recordingDuration < 3) {
-      console.log(`No voicemail left (${recordingDuration}s), sending SMS follow-up`);
+    // ===========================================
+    // DETERMINISTIC SMS LOGIC:
+    // 1. Voicemail left (3+ seconds) = NO SMS
+    // 2. No voicemail + cooldown active = NO SMS
+    // 3. No voicemail + no cooldown = SEND SMS
+    // ===========================================
 
-      if (settings.twilio_account_sid && settings.twilio_auth_token) {
-        const client = twilio(settings.twilio_account_sid, settings.twilio_auth_token);
-
-        const practiceName = settings.practice_name || 'our practice';
-        const followUpMessage = settings.ai_greeting ||
-          `Hi! This is ${practiceName}. We missed your call and want to make sure we help you. Reply 1 for us to call you back, or Reply 2 to schedule an appointment. Thanks!`;
-
-        try {
-          const message = await client.messages.create({
-            body: followUpMessage,
-            from: twilioNumber,
-            to: originalFrom
-          });
-
-          // Create conversation
-          const conversationResult = await query(
-            `INSERT INTO conversations (user_id, call_id, caller_phone, channel, direction, status)
-             VALUES ($1, $2, $3, 'sms', 'outbound', 'active')
-             RETURNING id`,
-            [settings.user_id, callId, originalFrom]
-          );
-
-          const conversationId = conversationResult.rows[0].id;
-
-          // Store the outgoing message
-          await query(
-            `INSERT INTO messages (conversation_id, sender, content, message_type, twilio_sid, delivered)
-             VALUES ($1, 'ai', $2, 'text', $3, true)`,
-            [conversationId, followUpMessage, message.sid]
-          );
-
-          // Update call with conversation link
-          await query(
-            `UPDATE calls SET conversation_id = $1, followup_status = 'in_progress', followup_attempts = 1, last_followup_at = NOW()
-             WHERE id = $2`,
-            [conversationId, callId]
-          );
-
-          // Create lead
-          await query(
-            `INSERT INTO leads (user_id, call_id, conversation_id, name, phone, status, source)
-             VALUES ($1, $2, $3, 'Unknown Caller', $4, 'new', 'missed_call')`,
-            [settings.user_id, callId, conversationId, originalFrom]
-          );
-
-          console.log(`SMS follow-up sent to ${originalFrom}`);
-        } catch (smsError) {
-          console.error('Failed to send SMS follow-up:', smsError);
-        }
-      }
-    } else {
+    if (recordingDuration >= 3) {
+      // VOICEMAIL LEFT - Don't send SMS, dentist will listen and call back
       console.log(`Voicemail left (${recordingDuration}s), NOT sending SMS`);
 
-      // Still create a lead for the voicemail
+      // Create lead for the voicemail so it shows in dashboard
       await query(
         `INSERT INTO leads (user_id, call_id, name, phone, status, source, reason)
          VALUES ($1, $2, 'Unknown Caller', $3, 'new', 'voicemail', 'Left voicemail')`,
         [settings.user_id, callId, originalFrom]
       );
-    }
 
-    // Thank them and hang up
-    const twiml = new twilio.twiml.VoiceResponse();
-    if (recordingDuration >= 3) {
+      const twiml = new twilio.twiml.VoiceResponse();
       twiml.say({ voice: 'alice' }, 'Thank you for your message. We will get back to you soon. Goodbye!');
-    } else {
-      twiml.say({ voice: 'alice' }, 'We will text you shortly. Goodbye!');
+      twiml.hangup();
+      return res.type('text/xml').send(twiml.toString());
     }
-    twiml.hangup();
 
+    // NO VOICEMAIL - Check cooldown before sending SMS
+    const canSend = await canSendSMS(settings.user_id, originalFrom);
+
+    if (!canSend) {
+      console.log(`SMS cooldown active for ${originalFrom}, NOT sending duplicate SMS`);
+
+      // Update call to note we skipped SMS due to cooldown
+      await query(
+        `UPDATE calls SET followup_status = 'cooldown_skipped' WHERE id = $1`,
+        [callId]
+      );
+
+      const twiml = new twilio.twiml.VoiceResponse();
+      twiml.say({ voice: 'alice' }, 'We will be in touch shortly. Goodbye!');
+      twiml.hangup();
+      return res.type('text/xml').send(twiml.toString());
+    }
+
+    // NO VOICEMAIL + NO COOLDOWN = Send SMS
+    console.log(`No voicemail, no cooldown - sending SMS follow-up to ${originalFrom}`);
+
+    if (settings.twilio_account_sid && settings.twilio_auth_token) {
+      const client = twilio(settings.twilio_account_sid, settings.twilio_auth_token);
+
+      const practiceName = settings.practice_name || 'our practice';
+      const followUpMessage = settings.ai_greeting ||
+        `Hi! This is ${practiceName}. We missed your call and want to make sure we help you. Reply 1 for us to call you back, or Reply 2 to schedule an appointment. Thanks!`;
+
+      try {
+        const message = await client.messages.create({
+          body: followUpMessage,
+          from: twilioNumber,
+          to: originalFrom
+        });
+
+        // Create conversation
+        const conversationResult = await query(
+          `INSERT INTO conversations (user_id, call_id, caller_phone, channel, direction, status)
+           VALUES ($1, $2, $3, 'sms', 'outbound', 'active')
+           RETURNING id`,
+          [settings.user_id, callId, originalFrom]
+        );
+
+        const conversationId = conversationResult.rows[0].id;
+
+        // Store the outgoing message
+        await query(
+          `INSERT INTO messages (conversation_id, sender, content, message_type, twilio_sid, delivered)
+           VALUES ($1, 'ai', $2, 'text', $3, true)`,
+          [conversationId, followUpMessage, message.sid]
+        );
+
+        // Update call with conversation link
+        await query(
+          `UPDATE calls SET conversation_id = $1, followup_status = 'in_progress', followup_attempts = 1, last_followup_at = NOW()
+           WHERE id = $2`,
+          [conversationId, callId]
+        );
+
+        // Create lead
+        await query(
+          `INSERT INTO leads (user_id, call_id, conversation_id, name, phone, status, source)
+           VALUES ($1, $2, $3, 'Unknown Caller', $4, 'new', 'missed_call')`,
+          [settings.user_id, callId, conversationId, originalFrom]
+        );
+
+        console.log(`SMS follow-up sent to ${originalFrom}`);
+      } catch (smsError) {
+        console.error('Failed to send SMS follow-up:', smsError);
+      }
+    }
+
+    // SMS sent successfully - tell them and hang up
+    const twiml = new twilio.twiml.VoiceResponse();
+    twiml.say({ voice: 'alice' }, 'We will text you shortly. Goodbye!');
+    twiml.hangup();
     res.type('text/xml').send(twiml.toString());
+
   } catch (error) {
     console.error('Voicemail complete error:', error);
     const twiml = new twilio.twiml.VoiceResponse();
@@ -830,6 +876,26 @@ async function handleConversation(conversationId, incomingMessage, settings) {
 
       // Valid selection!
       const selectedTime = suggestedTimes[selectedIndex];
+      const appointmentDate = selectedTime.toISOString().split('T')[0];
+      const appointmentTime = selectedTime.toTimeString().slice(0, 5);
+
+      // Check for double booking - is this slot already taken?
+      const existingBooking = await query(
+        `SELECT id FROM appointments
+         WHERE user_id = $1
+           AND appointment_date = $2::date
+           AND appointment_time = $3
+           AND status NOT IN ('cancelled', 'no_show')
+         LIMIT 1`,
+        [settings.user_id, appointmentDate, appointmentTime]
+      );
+
+      if (existingBooking.rows.length > 0) {
+        // Slot is taken! Offer alternatives
+        console.log(`Double booking prevented for ${appointmentDate} ${appointmentTime}`);
+        return `Sorry, that time slot was just booked! Please reply with a different number, or let us know a time that works and we'll call you back.`;
+      }
+
       const formattedTime = selectedTime.toLocaleString('en-US', {
         weekday: 'long',
         month: 'long',
@@ -863,7 +929,7 @@ async function handleConversation(conversationId, incomingMessage, settings) {
          FROM conversations c
          LEFT JOIN leads l ON l.conversation_id = c.id
          WHERE c.id = $4`,
-        [selectedTime.toISOString().split('T')[0], selectedTime.toTimeString().slice(0,5), intent, conversationId]
+        [appointmentDate, appointmentTime, intent, conversationId]
       );
 
       if (settings.booking_mode === 'auto') {
