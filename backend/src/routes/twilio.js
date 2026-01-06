@@ -1,30 +1,9 @@
 const express = require('express');
 const twilio = require('twilio');
-const { google } = require('googleapis');
-const crypto = require('crypto');
 const { query } = require('../db/config');
 const { authenticate } = require('../middleware/auth');
 
 const router = express.Router();
-
-// Encryption key for Google credentials (same as calendar.js)
-const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || crypto.randomBytes(32).toString('hex').slice(0, 32);
-
-// Decrypt sensitive data
-function decrypt(text) {
-  if (!text) return null;
-  try {
-    const textParts = text.split(':');
-    const iv = Buffer.from(textParts.shift(), 'hex');
-    const encryptedText = Buffer.from(textParts.join(':'), 'hex');
-    const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(ENCRYPTION_KEY), iv);
-    let decrypted = decipher.update(encryptedText);
-    decrypted = Buffer.concat([decrypted, decipher.final()]);
-    return decrypted.toString();
-  } catch (error) {
-    return null;
-  }
-}
 
 /**
  * SmileDesk Twilio Integration - SMS Only
@@ -146,7 +125,7 @@ router.post('/voice/dial-status', async (req, res) => {
 
           const practiceName = settings.practice_name || 'our practice';
           const followUpMessage = settings.ai_greeting ||
-            `Hi! We noticed we missed your call at ${practiceName}. How can we help you today? Reply to this message or let us know a good time to reach you.`;
+            `Hi! This is ${practiceName}. We missed your call and want to make sure we help you. Reply 1 for us to call you back, or Reply 2 to schedule an appointment. Thanks!`;
 
           try {
             const message = await client.messages.create({
@@ -333,7 +312,7 @@ router.post('/call/missed', async (req, res) => {
     // Get follow-up message (custom or default)
     const practiceName = settings.practice_name || 'our practice';
     const followUpMessage = settings.ai_greeting ||
-      `Hi! We noticed we missed your call at ${practiceName}. How can we help you today? Reply to this message or let us know a good time to reach you.`;
+      `Hi! This is ${practiceName}. We missed your call and want to make sure we help you. Reply 1 for us to call you back, or Reply 2 to schedule an appointment. Thanks!`;
 
     // Send SMS follow-up using Twilio client
     if (settings.twilio_account_sid && settings.twilio_auth_token) {
@@ -514,34 +493,35 @@ router.post('/send-sms', async (req, res) => {
 // ============================================
 
 /**
- * Detect user intent from their message
+ * Detect user intent from their message using deterministic rules
+ * V1: Rules > AI - Simple keyword matching
  */
 function detectIntent(message) {
-  const lower = message.toLowerCase();
+  const trimmed = message.trim();
+  const lower = trimmed.toLowerCase();
 
-  // Callback keywords
-  if (lower.includes('call') && (lower.includes('back') || lower.includes('me'))) {
+  // Check for "1" = callback
+  if (trimmed === '1' || lower === 'one' || lower === '1.') {
     return 'callback';
   }
-  if (lower.includes('talk') || lower.includes('speak') || lower.includes('ring')) {
+
+  // Check for "2" = appointment/booking
+  if (trimmed === '2' || lower === 'two' || lower === '2.') {
+    return 'appointment';
+  }
+
+  // Keyword matching for callback
+  if (lower.includes('call') || lower.includes('callback') || lower.includes('ring')) {
     return 'callback';
   }
 
-  // Appointment keywords
-  if (lower.includes('appointment') || lower.includes('schedule')) {
-    return 'appointment';
-  }
-  if (lower.includes('book') || lower.includes('come in') || lower.includes('visit')) {
+  // Keyword matching for booking/appointment
+  if (lower.includes('yes') || lower.includes('book') || lower.includes('appointment') || lower.includes('schedule')) {
     return 'appointment';
   }
 
-  // Time-related = probably appointment
-  if (lower.includes('time') || lower.includes('when') || lower.includes('available')) {
-    return 'appointment';
-  }
-
-  // Default to callback if unclear
-  return 'callback';
+  // If contains details/question, capture as free-text
+  return 'freetext';
 }
 
 /**
@@ -566,84 +546,9 @@ function parseTimeSelection(message) {
 }
 
 /**
- * Get Google Calendar events if connected
+ * Generate available time slots from business hours
  */
-async function getGoogleCalendarEvents(settings) {
-  // Check if Google Calendar is connected
-  if (!settings.google_calendar_connected || !settings.google_tokens) {
-    return null; // Not connected, skip calendar check
-  }
-
-  if (!settings.google_client_id || !settings.google_client_secret) {
-    return null; // No credentials configured
-  }
-
-  try {
-    // Create OAuth client
-    const decryptedSecret = decrypt(settings.google_client_secret) || settings.google_client_secret;
-    const redirectUri = process.env.GOOGLE_REDIRECT_URI ||
-      (process.env.FRONTEND_URL ? `${process.env.FRONTEND_URL.replace(/\/$/, '')}/api/calendar/callback` :
-      'http://localhost:3001/api/calendar/callback');
-
-    const oauth2Client = new google.auth.OAuth2(
-      settings.google_client_id,
-      decryptedSecret,
-      redirectUri
-    );
-
-    // Parse and set tokens
-    let tokens = settings.google_tokens;
-    if (typeof tokens === 'string') {
-      tokens = JSON.parse(tokens);
-    }
-    oauth2Client.setCredentials(tokens);
-
-    // Fetch events for next 14 days
-    const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
-    const now = new Date();
-    const twoWeeksLater = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
-
-    const eventsResponse = await calendar.events.list({
-      calendarId: 'primary',
-      timeMin: now.toISOString(),
-      timeMax: twoWeeksLater.toISOString(),
-      singleEvents: true,
-      orderBy: 'startTime'
-    });
-
-    return eventsResponse.data.items || [];
-  } catch (error) {
-    console.error('Error fetching Google Calendar events:', error.message);
-    return null; // On error, continue without calendar check
-  }
-}
-
-/**
- * Check if a slot conflicts with any calendar event
- */
-function slotConflictsWithEvents(slot, events, durationMinutes = 30) {
-  if (!events || events.length === 0) return false;
-
-  const slotStart = new Date(slot);
-  const slotEnd = new Date(slotStart.getTime() + durationMinutes * 60 * 1000);
-
-  for (const event of events) {
-    const eventStart = new Date(event.start.dateTime || event.start.date);
-    const eventEnd = new Date(event.end.dateTime || event.end.date);
-
-    // Check for overlap
-    if (slotStart < eventEnd && slotEnd > eventStart) {
-      return true; // Conflict found
-    }
-  }
-
-  return false;
-}
-
-/**
- * Generate available time slots from business hours (with optional Google Calendar check)
- */
-async function getAvailableSlotsFromBusinessHours(businessHours, numSlots = 3, settings = null) {
+function getAvailableSlotsFromBusinessHours(businessHours, numSlots = 3) {
   const slots = [];
   const now = new Date();
   let daysChecked = 0;
@@ -661,15 +566,6 @@ async function getAvailableSlotsFromBusinessHours(businessHours, numSlots = 3, s
 
   const hours = businessHours && Object.keys(businessHours).length > 0 ? businessHours : defaultHours;
   const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-
-  // Get Google Calendar events if connected
-  let calendarEvents = null;
-  if (settings) {
-    calendarEvents = await getGoogleCalendarEvents(settings);
-    if (calendarEvents) {
-      console.log(`Google Calendar connected - checking ${calendarEvents.length} events for conflicts`);
-    }
-  }
 
   while (slots.length < numSlots && daysChecked < 14) {
     const checkDate = new Date(now);
@@ -694,16 +590,12 @@ async function getAvailableSlotsFromBusinessHours(businessHours, numSlots = 3, s
 
       // Check morning slot
       if (morningSlot >= minTime && slots.length < numSlots) {
-        if (!slotConflictsWithEvents(morningSlot, calendarEvents)) {
-          slots.push(new Date(morningSlot));
-        }
+        slots.push(new Date(morningSlot));
       }
 
       // Check afternoon slot
       if (afternoonSlot >= minTime && afternoonSlot.getHours() < closeHour && slots.length < numSlots) {
-        if (!slotConflictsWithEvents(afternoonSlot, calendarEvents)) {
-          slots.push(new Date(afternoonSlot));
-        }
+        slots.push(new Date(afternoonSlot));
       }
     }
 
@@ -748,12 +640,28 @@ async function handleConversation(conversationId, incomingMessage, settings) {
   switch (currentStatus) {
     case 'active':
     case 'awaiting_response': {
-      // First response - detect intent and offer times
+      // First response - detect intent using deterministic rules
       const intent = detectIntent(incomingMessage);
 
-      // Get available slots from business hours (+ Google Calendar if connected)
+      // Handle free-text (neither 1, 2, nor keywords) - capture details
+      if (intent === 'freetext') {
+        // Update lead with the details they provided
+        await query(
+          `UPDATE leads SET status = 'qualified', reason = $1 WHERE conversation_id = $2`,
+          [`Patient message: ${incomingMessage}`, conversationId]
+        );
+
+        await query(
+          `UPDATE conversations SET status = 'callback_requested' WHERE id = $1`,
+          [conversationId]
+        );
+
+        return `Thanks for the details! Someone from ${practiceName} will call you back shortly to help. Reply 1 if you'd like us to call you back, or 2 to schedule an appointment.`;
+      }
+
+      // Get available slots from business hours
       const businessHours = settings.business_hours || {};
-      const slots = await getAvailableSlotsFromBusinessHours(businessHours, 3, settings);
+      const slots = getAvailableSlotsFromBusinessHours(businessHours, 3);
 
       if (slots.length === 0) {
         // No available times

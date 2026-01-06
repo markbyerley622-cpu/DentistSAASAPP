@@ -1,22 +1,19 @@
 import { useState, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
-import { settingsAPI, calendarAPI, authAPI } from '../lib/api'
+import { settingsAPI, authAPI } from '../lib/api'
 import {
   Settings as SettingsIcon,
   Building2,
   Phone,
   Bell,
-  Calendar,
   Sparkles,
   Clock,
   Check,
   X,
   AlertCircle,
   Save,
-  Loader2,
-  Link2,
-  Unlink
+  Loader2
 } from 'lucide-react'
 
 function SettingsSection({ title, description, icon: Icon, children }) {
@@ -105,10 +102,6 @@ export default function Settings() {
     businessHours: {}
   })
 
-  const [calendarConnected, setCalendarConnected] = useState(false)
-  const [calendarCredentialsConfigured, setCalendarCredentialsConfigured] = useState(false)
-  const [googleCredentials, setGoogleCredentials] = useState({ clientId: '', clientSecret: '' })
-  const [savingGoogleCredentials, setSavingGoogleCredentials] = useState(false)
   const [savingBusinessHours, setSavingBusinessHours] = useState(false)
 
   const defaultBusinessHours = {
@@ -126,10 +119,7 @@ export default function Settings() {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const [settingsRes, calendarRes] = await Promise.all([
-          settingsAPI.get(),
-          calendarAPI.getStatus()
-        ])
+        const settingsRes = await settingsAPI.get()
 
         setSettings({
           twilioPhone: settingsRes.data.settings.twilioPhone || '',
@@ -148,9 +138,6 @@ export default function Settings() {
           setBusinessHours(settingsRes.data.settings.businessHours)
         }
 
-        setCalendarConnected(calendarRes.data.connected)
-        setCalendarCredentialsConfigured(calendarRes.data.credentialsConfigured || false)
-
         setProfile({
           practiceName: user?.practiceName || '',
           phone: user?.phone || '',
@@ -164,16 +151,7 @@ export default function Settings() {
     }
 
     fetchData()
-
-    // Check for calendar connection callback
-    const calendarStatus = searchParams.get('calendar')
-    if (calendarStatus === 'success') {
-      setSuccess('Google Calendar connected successfully!')
-      setCalendarConnected(true)
-    } else if (calendarStatus === 'error') {
-      setError('Failed to connect Google Calendar. Please try again.')
-    }
-  }, [user, searchParams])
+  }, [user])
 
   const handleSaveProfile = async () => {
     setSaving(true)
@@ -232,62 +210,6 @@ export default function Settings() {
       setError(err.response?.data?.error?.message || 'Failed to save AI greeting')
     } finally {
       setSaving(false)
-    }
-  }
-
-  const handleSaveGoogleCredentials = async () => {
-    if (!googleCredentials.clientId || !googleCredentials.clientSecret) {
-      setError('Please enter both Client ID and Client Secret')
-      return
-    }
-
-    setSavingGoogleCredentials(true)
-    try {
-      await calendarAPI.saveCredentials({
-        clientId: googleCredentials.clientId,
-        clientSecret: googleCredentials.clientSecret
-      })
-      setCalendarCredentialsConfigured(true)
-      setGoogleCredentials({ clientId: '', clientSecret: '' })
-      setSuccess('Google OAuth credentials saved! You can now connect your calendar.')
-    } catch (err) {
-      setError(err.response?.data?.error?.message || 'Failed to save Google credentials')
-    } finally {
-      setSavingGoogleCredentials(false)
-    }
-  }
-
-  const handleRemoveGoogleCredentials = async () => {
-    try {
-      await calendarAPI.removeCredentials()
-      setCalendarCredentialsConfigured(false)
-      setCalendarConnected(false)
-      setSuccess('Google OAuth credentials removed')
-    } catch (err) {
-      setError('Failed to remove credentials')
-    }
-  }
-
-  const handleConnectCalendar = async () => {
-    try {
-      const response = await calendarAPI.getAuthUrl()
-      window.location.href = response.data.authUrl
-    } catch (err) {
-      if (err.response?.data?.error?.code === 'CREDENTIALS_NOT_CONFIGURED') {
-        setError('Please configure your Google OAuth credentials first')
-      } else {
-        setError(err.response?.data?.error?.message || 'Failed to connect to Google Calendar')
-      }
-    }
-  }
-
-  const handleDisconnectCalendar = async () => {
-    try {
-      await calendarAPI.disconnect()
-      setCalendarConnected(false)
-      setSuccess('Google Calendar disconnected')
-    } catch (err) {
-      setError('Failed to disconnect calendar')
     }
   }
 
@@ -479,13 +401,15 @@ export default function Settings() {
             <textarea
               value={(() => {
                 const practiceName = user?.practiceName || 'Our Practice';
-                const defaultGreeting = `Hi! This is ${practiceName}. We missed your call and want to make sure we help you. Would you like us to call you back, or would you prefer to schedule an appointment? Just reply here!`;
+                const defaultGreeting = `Hi! This is ${practiceName}. We missed your call and want to make sure we help you. Reply 1 for us to call you back, or Reply 2 to schedule an appointment. Thanks!`;
                 // If no greeting set, or it's an old default, use the new one
                 if (!settings.aiGreeting ||
                     settings.aiGreeting.includes('the dental practice') ||
                     settings.aiGreeting.includes('for the dental practice') ||
                     settings.aiGreeting.includes('Thank you for calling') ||
-                    settings.aiGreeting.includes('How can we help you today')) {
+                    settings.aiGreeting.includes('How can we help you today') ||
+                    settings.aiGreeting.includes('Would you like us to call you back') ||
+                    settings.aiGreeting.includes('Just reply here')) {
                   return defaultGreeting;
                 }
                 return settings.aiGreeting;
@@ -493,10 +417,10 @@ export default function Settings() {
               onChange={(e) => setSettings({ ...settings, aiGreeting: e.target.value })}
               rows={4}
               className="input resize-none"
-              placeholder={`Hi! This is ${user?.practiceName || 'Our Practice'}. We missed your call and want to make sure we help you. Would you like us to call you back, or would you prefer to schedule an appointment? Just reply here!`}
+              placeholder={`Hi! This is ${user?.practiceName || 'Our Practice'}. We missed your call and want to make sure we help you. Reply 1 for us to call you back, or Reply 2 to schedule an appointment. Thanks!`}
             />
             <p className="text-xs text-dark-500 mt-2">
-              This is the SMS message sent when following up on missed calls
+              This is the SMS message sent when following up on missed calls. Patients reply 1 or 2.
             </p>
           </div>
           <button onClick={handleSaveAiGreeting} disabled={saving} className="btn-primary">
@@ -537,120 +461,6 @@ export default function Settings() {
             {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
             <span className="ml-2">Save Notifications</span>
           </button>
-        </div>
-      </SettingsSection>
-
-      {/* Google Calendar */}
-      <SettingsSection
-        title="Google Calendar"
-        description="Connect your calendar for automatic appointment booking"
-        icon={Calendar}
-      >
-        <div className="space-y-4">
-          {/* Step 1: Setup Instructions */}
-          {!calendarCredentialsConfigured && (
-            <div className="p-4 rounded-lg bg-accent-500/10 border border-accent-500/20">
-              <p className="text-sm font-medium text-accent-400 mb-2">Setup Required</p>
-              <p className="text-xs text-accent-300/80 mb-3">
-                To connect Google Calendar, you need to create your own Google OAuth credentials:
-              </p>
-              <ol className="text-xs text-accent-300/80 space-y-1 list-decimal list-inside mb-3">
-                <li>Go to <a href="https://console.cloud.google.com" target="_blank" rel="noopener noreferrer" className="underline hover:text-accent-400">Google Cloud Console</a></li>
-                <li>Create a new project or select an existing one</li>
-                <li>Enable the "Google Calendar API"</li>
-                <li>Configure the OAuth consent screen (External, add your email as test user)</li>
-                <li>Go to "Credentials" and create an OAuth 2.0 Client ID (Web application)</li>
-                <li>Add this redirect URI: <code className="bg-dark-800 px-1 rounded text-accent-400">{window.location.origin}/api/calendar/callback</code></li>
-                <li>Copy the Client ID and Client Secret below</li>
-              </ol>
-              <div className="mt-3 p-2 rounded bg-warning-500/10 border border-warning-500/20">
-                <p className="text-xs text-warning-400">
-                  <strong>Note:</strong> New OAuth apps are in "Testing" mode and limited to 100 users.
-                  For production use, submit your app for Google verification in the OAuth consent screen settings.
-                </p>
-              </div>
-            </div>
-          )}
-
-          {/* Step 2: Credentials Input */}
-          {!calendarCredentialsConfigured ? (
-            <div className="space-y-4">
-              <div className="input-group">
-                <label className="input-label">Google OAuth Client ID</label>
-                <input
-                  type="text"
-                  value={googleCredentials.clientId}
-                  onChange={(e) => setGoogleCredentials({ ...googleCredentials, clientId: e.target.value })}
-                  className="input"
-                  placeholder="xxxx.apps.googleusercontent.com"
-                />
-              </div>
-              <div className="input-group">
-                <label className="input-label">Google OAuth Client Secret</label>
-                <input
-                  type="password"
-                  value={googleCredentials.clientSecret}
-                  onChange={(e) => setGoogleCredentials({ ...googleCredentials, clientSecret: e.target.value })}
-                  className="input"
-                  placeholder="Enter your client secret"
-                />
-              </div>
-              <button
-                onClick={handleSaveGoogleCredentials}
-                disabled={savingGoogleCredentials}
-                className="btn-primary flex items-center gap-2"
-              >
-                {savingGoogleCredentials ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-                Save Credentials
-              </button>
-            </div>
-          ) : (
-            <>
-              {/* Credentials configured badge */}
-              <div className="p-3 rounded-lg bg-success-500/10 border border-success-500/20 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Check className="w-4 h-4 text-success-400" />
-                  <span className="text-sm text-success-400">Google OAuth credentials configured</span>
-                </div>
-                <button
-                  onClick={handleRemoveGoogleCredentials}
-                  className="text-xs text-dark-400 hover:text-danger-400 transition-colors"
-                >
-                  Remove
-                </button>
-              </div>
-
-              {/* Step 3: Connect Calendar */}
-              <div className="p-4 rounded-lg bg-dark-800/50">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <div className={`w-3 h-3 rounded-full ${calendarConnected ? 'bg-success-500' : 'bg-dark-500'}`} />
-                    <div>
-                      <p className="font-medium text-dark-200">
-                        {calendarConnected ? 'Connected' : 'Not Connected'}
-                      </p>
-                      <p className="text-sm text-dark-400">
-                        {calendarConnected
-                          ? 'Your Google Calendar is linked'
-                          : 'Click to authorize access to your Google Calendar'}
-                      </p>
-                    </div>
-                  </div>
-                  {calendarConnected ? (
-                    <button onClick={handleDisconnectCalendar} className="btn-secondary flex items-center gap-2">
-                      <Unlink className="w-4 h-4" />
-                      Disconnect
-                    </button>
-                  ) : (
-                    <button onClick={handleConnectCalendar} className="btn-primary flex items-center gap-2">
-                      <Link2 className="w-4 h-4" />
-                      Connect Calendar
-                    </button>
-                  )}
-                </div>
-              </div>
-            </>
-          )}
         </div>
       </SettingsSection>
 
@@ -714,9 +524,7 @@ export default function Settings() {
           {/* Info banner */}
           <div className="p-4 rounded-lg bg-accent-500/10 border border-accent-500/20">
             <p className="text-sm text-accent-300">
-              {calendarConnected
-                ? "Google Calendar is connected - the AI will check your calendar for conflicts before offering times."
-                : "Set your open hours below. The AI will offer 30-minute appointment slots during these times."}
+              Set your open hours below. The system will offer 30-minute appointment slots during these times.
             </p>
           </div>
 

@@ -250,7 +250,6 @@ function formatSettings(settings) {
     notificationSms: settings.notification_sms,
     bookingMode: settings.booking_mode,
     businessHours: settings.business_hours,
-    googleCalendarConnected: settings.google_calendar_connected,
     aiGreeting: settings.ai_greeting,
     createdAt: settings.created_at,
     updatedAt: settings.updated_at
