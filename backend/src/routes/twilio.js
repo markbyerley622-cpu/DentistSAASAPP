@@ -634,13 +634,18 @@ function detectIntent(message) {
     return 'appointment';
   }
 
+  // Check for "YES" confirmation (for next available slot)
+  if (lower === 'yes' || lower === 'yeah' || lower === 'yep' || lower === 'confirm' || lower === 'ok' || lower === 'okay') {
+    return 'confirm';
+  }
+
   // Keyword matching for callback
   if (lower.includes('call') || lower.includes('callback') || lower.includes('ring')) {
     return 'callback';
   }
 
   // Keyword matching for booking/appointment
-  if (lower.includes('yes') || lower.includes('book') || lower.includes('appointment') || lower.includes('schedule')) {
+  if (lower.includes('book') || lower.includes('appointment') || lower.includes('schedule')) {
     return 'appointment';
   }
 
@@ -667,6 +672,85 @@ function parseTimeSelection(message) {
   if (lower.includes('third') || lower === '3' || lower.includes('three')) return 2;
 
   return -1; // Couldn't parse
+}
+
+/**
+ * Find the next available 30-minute slot after a given time
+ * Checks against existing appointments to avoid double booking
+ */
+async function findNextAvailableSlot(userId, startTime, businessHours, maxDaysToCheck = 7) {
+  const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+
+  const defaultHours = {
+    monday: { enabled: true, open: '09:00', close: '17:00' },
+    tuesday: { enabled: true, open: '09:00', close: '17:00' },
+    wednesday: { enabled: true, open: '09:00', close: '17:00' },
+    thursday: { enabled: true, open: '09:00', close: '17:00' },
+    friday: { enabled: true, open: '09:00', close: '17:00' },
+    saturday: { enabled: false, open: '09:00', close: '13:00' },
+    sunday: { enabled: false, open: '09:00', close: '13:00' }
+  };
+
+  const hours = businessHours && Object.keys(businessHours).length > 0 ? businessHours : defaultHours;
+
+  // Start checking from 30 minutes after the requested time
+  let checkTime = new Date(startTime.getTime() + 30 * 60 * 1000);
+  let daysChecked = 0;
+
+  while (daysChecked < maxDaysToCheck) {
+    const dayName = dayNames[checkTime.getDay()];
+    const dayHours = hours[dayName];
+
+    if (dayHours && dayHours.enabled) {
+      const [openHour, openMin] = dayHours.open.split(':').map(Number);
+      const [closeHour, closeMin] = dayHours.close.split(':').map(Number);
+
+      // Set bounds for this day
+      const dayStart = new Date(checkTime);
+      dayStart.setHours(openHour, openMin, 0, 0);
+
+      const dayEnd = new Date(checkTime);
+      dayEnd.setHours(closeHour, closeMin, 0, 0);
+
+      // If we're before opening, start at opening
+      if (checkTime < dayStart) {
+        checkTime = new Date(dayStart);
+      }
+
+      // Check 30-minute slots until closing
+      while (checkTime < dayEnd) {
+        const slotDate = checkTime.toISOString().split('T')[0];
+        const slotTime = checkTime.toTimeString().slice(0, 5);
+
+        // Check if this slot is available
+        const existing = await query(
+          `SELECT id FROM appointments
+           WHERE user_id = $1
+             AND appointment_date = $2::date
+             AND appointment_time = $3
+             AND status NOT IN ('cancelled', 'no_show')
+           LIMIT 1`,
+          [userId, slotDate, slotTime]
+        );
+
+        if (existing.rows.length === 0) {
+          // Found an available slot!
+          return new Date(checkTime);
+        }
+
+        // Move to next 30-minute slot
+        checkTime = new Date(checkTime.getTime() + 30 * 60 * 1000);
+      }
+    }
+
+    // Move to next day at midnight
+    checkTime = new Date(checkTime);
+    checkTime.setDate(checkTime.getDate() + 1);
+    checkTime.setHours(0, 0, 0, 0);
+    daysChecked++;
+  }
+
+  return null; // No available slots found
 }
 
 /**
@@ -853,6 +937,13 @@ async function handleConversation(conversationId, incomingMessage, settings) {
       const suggestedTimes = systemData.suggested_times.map(t => new Date(t));
       const intent = systemData.intent || 'appointment';
 
+      // Handle YES confirmation for "next available" single slot offer
+      const userIntent = detectIntent(incomingMessage);
+      if (userIntent === 'confirm' && suggestedTimes.length === 1 && systemData.original_choice_taken) {
+        // They're confirming the next available slot we offered
+        selectedIndex = 0;
+      }
+
       if (selectedIndex === -1 || selectedIndex >= suggestedTimes.length) {
         // Check if they want a different time or callback
         if (lower.includes('different') || lower.includes('other') || lower.includes('none')) {
@@ -891,9 +982,33 @@ async function handleConversation(conversationId, incomingMessage, settings) {
       );
 
       if (existingBooking.rows.length > 0) {
-        // Slot is taken! Offer alternatives
+        // Slot is taken! Find next available slot
         console.log(`Double booking prevented for ${appointmentDate} ${appointmentTime}`);
-        return `Sorry, that time slot was just booked! Please reply with a different number, or let us know a time that works and we'll call you back.`;
+
+        const nextSlot = await findNextAvailableSlot(settings.user_id, selectedTime, settings.business_hours);
+
+        if (nextSlot) {
+          const nextFormatted = nextSlot.toLocaleString('en-US', {
+            weekday: 'long',
+            month: 'long',
+            day: 'numeric',
+            hour: 'numeric',
+            minute: '2-digit',
+            hour12: true
+          });
+
+          // Store the new suggested time for next response
+          await query(
+            `UPDATE messages SET content = $1
+             WHERE conversation_id = $2 AND message_type = 'system'
+             ORDER BY created_at DESC LIMIT 1`,
+            [JSON.stringify({ suggested_times: [nextSlot], intent, original_choice_taken: true }), conversationId]
+          );
+
+          return `Sorry, that time was just booked! The next available slot is ${nextFormatted}. Reply YES to confirm, or let us know another time that works.`;
+        } else {
+          return `Sorry, that time was just booked and we're quite full. We'll have someone call you to find a time that works.`;
+        }
       }
 
       const formattedTime = selectedTime.toLocaleString('en-US', {
