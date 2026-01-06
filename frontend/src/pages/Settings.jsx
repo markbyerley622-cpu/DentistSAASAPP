@@ -371,6 +371,35 @@ export default function Settings() {
         </div>
       </SettingsSection>
 
+      {/* Twilio Phone Number */}
+      <SettingsSection
+        title="Your Twilio Number"
+        description="This is your dedicated patient line - add it to your VoIP system"
+        icon={Phone}
+      >
+        <div className="space-y-4">
+          {settings.twilioPhone ? (
+            <>
+              <div className="p-4 rounded-lg bg-accent-500/10 border border-accent-500/20">
+                <p className="text-xs text-accent-400 mb-2">Your Twilio Phone Number</p>
+                <p className="text-2xl font-bold text-dark-100 tracking-wide">{settings.twilioPhone}</p>
+              </div>
+              <div className="p-3 rounded-lg bg-dark-800/50 border border-dark-700/50">
+                <p className="text-sm text-dark-300">
+                  Add this number to your VoIP system or give it to patients. Missed calls will trigger automatic SMS follow-ups.
+                </p>
+              </div>
+            </>
+          ) : (
+            <div className="p-4 rounded-lg bg-warning-500/10 border border-warning-500/20">
+              <p className="text-sm text-warning-400">
+                No Twilio number assigned yet. Contact support to get your dedicated patient line set up.
+              </p>
+            </div>
+          )}
+        </div>
+      </SettingsSection>
+
       {/* Call Forwarding */}
       <SettingsSection
         title="Call Forwarding"
