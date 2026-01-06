@@ -1,9 +1,30 @@
 const express = require('express');
 const twilio = require('twilio');
+const { google } = require('googleapis');
+const crypto = require('crypto');
 const { query } = require('../db/config');
 const { authenticate } = require('../middleware/auth');
 
 const router = express.Router();
+
+// Encryption key for Google credentials (same as calendar.js)
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || crypto.randomBytes(32).toString('hex').slice(0, 32);
+
+// Decrypt sensitive data
+function decrypt(text) {
+  if (!text) return null;
+  try {
+    const textParts = text.split(':');
+    const iv = Buffer.from(textParts.shift(), 'hex');
+    const encryptedText = Buffer.from(textParts.join(':'), 'hex');
+    const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(ENCRYPTION_KEY), iv);
+    let decrypted = decipher.update(encryptedText);
+    decrypted = Buffer.concat([decrypted, decipher.final()]);
+    return decrypted.toString();
+  } catch (error) {
+    return null;
+  }
+}
 
 /**
  * SmileDesk Twilio Integration - SMS Only
@@ -545,9 +566,84 @@ function parseTimeSelection(message) {
 }
 
 /**
- * Generate available time slots from business hours
+ * Get Google Calendar events if connected
  */
-function getAvailableSlotsFromBusinessHours(businessHours, numSlots = 3) {
+async function getGoogleCalendarEvents(settings) {
+  // Check if Google Calendar is connected
+  if (!settings.google_calendar_connected || !settings.google_tokens) {
+    return null; // Not connected, skip calendar check
+  }
+
+  if (!settings.google_client_id || !settings.google_client_secret) {
+    return null; // No credentials configured
+  }
+
+  try {
+    // Create OAuth client
+    const decryptedSecret = decrypt(settings.google_client_secret) || settings.google_client_secret;
+    const redirectUri = process.env.GOOGLE_REDIRECT_URI ||
+      (process.env.FRONTEND_URL ? `${process.env.FRONTEND_URL.replace(/\/$/, '')}/api/calendar/callback` :
+      'http://localhost:3001/api/calendar/callback');
+
+    const oauth2Client = new google.auth.OAuth2(
+      settings.google_client_id,
+      decryptedSecret,
+      redirectUri
+    );
+
+    // Parse and set tokens
+    let tokens = settings.google_tokens;
+    if (typeof tokens === 'string') {
+      tokens = JSON.parse(tokens);
+    }
+    oauth2Client.setCredentials(tokens);
+
+    // Fetch events for next 14 days
+    const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+    const now = new Date();
+    const twoWeeksLater = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
+
+    const eventsResponse = await calendar.events.list({
+      calendarId: 'primary',
+      timeMin: now.toISOString(),
+      timeMax: twoWeeksLater.toISOString(),
+      singleEvents: true,
+      orderBy: 'startTime'
+    });
+
+    return eventsResponse.data.items || [];
+  } catch (error) {
+    console.error('Error fetching Google Calendar events:', error.message);
+    return null; // On error, continue without calendar check
+  }
+}
+
+/**
+ * Check if a slot conflicts with any calendar event
+ */
+function slotConflictsWithEvents(slot, events, durationMinutes = 30) {
+  if (!events || events.length === 0) return false;
+
+  const slotStart = new Date(slot);
+  const slotEnd = new Date(slotStart.getTime() + durationMinutes * 60 * 1000);
+
+  for (const event of events) {
+    const eventStart = new Date(event.start.dateTime || event.start.date);
+    const eventEnd = new Date(event.end.dateTime || event.end.date);
+
+    // Check for overlap
+    if (slotStart < eventEnd && slotEnd > eventStart) {
+      return true; // Conflict found
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Generate available time slots from business hours (with optional Google Calendar check)
+ */
+async function getAvailableSlotsFromBusinessHours(businessHours, numSlots = 3, settings = null) {
   const slots = [];
   const now = new Date();
   let daysChecked = 0;
@@ -565,6 +661,15 @@ function getAvailableSlotsFromBusinessHours(businessHours, numSlots = 3) {
 
   const hours = businessHours && Object.keys(businessHours).length > 0 ? businessHours : defaultHours;
   const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+
+  // Get Google Calendar events if connected
+  let calendarEvents = null;
+  if (settings) {
+    calendarEvents = await getGoogleCalendarEvents(settings);
+    if (calendarEvents) {
+      console.log(`Google Calendar connected - checking ${calendarEvents.length} events for conflicts`);
+    }
+  }
 
   while (slots.length < numSlots && daysChecked < 14) {
     const checkDate = new Date(now);
@@ -587,12 +692,18 @@ function getAvailableSlotsFromBusinessHours(businessHours, numSlots = 3) {
       // Skip times in the past
       const minTime = daysChecked === 0 ? new Date(now.getTime() + 60 * 60 * 1000) : morningSlot; // At least 1 hour from now
 
+      // Check morning slot
       if (morningSlot >= minTime && slots.length < numSlots) {
-        slots.push(new Date(morningSlot));
+        if (!slotConflictsWithEvents(morningSlot, calendarEvents)) {
+          slots.push(new Date(morningSlot));
+        }
       }
 
+      // Check afternoon slot
       if (afternoonSlot >= minTime && afternoonSlot.getHours() < closeHour && slots.length < numSlots) {
-        slots.push(new Date(afternoonSlot));
+        if (!slotConflictsWithEvents(afternoonSlot, calendarEvents)) {
+          slots.push(new Date(afternoonSlot));
+        }
       }
     }
 
@@ -640,9 +751,9 @@ async function handleConversation(conversationId, incomingMessage, settings) {
       // First response - detect intent and offer times
       const intent = detectIntent(incomingMessage);
 
-      // Get available slots from business hours
+      // Get available slots from business hours (+ Google Calendar if connected)
       const businessHours = settings.business_hours || {};
-      const slots = getAvailableSlotsFromBusinessHours(businessHours, 3);
+      const slots = await getAvailableSlotsFromBusinessHours(businessHours, 3, settings);
 
       if (slots.length === 0) {
         // No available times
