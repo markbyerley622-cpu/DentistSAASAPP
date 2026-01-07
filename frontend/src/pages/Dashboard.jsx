@@ -338,34 +338,40 @@ export default function Dashboard() {
       </div>
 
       {/* Voicemails with Intent */}
-      {voicemails.length > 0 && (
-        <div className="card">
-          <div className="flex items-center justify-between mb-6">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-lg bg-warning-500/10 flex items-center justify-center">
-                <Voicemail className="w-5 h-5 text-warning-400" />
-              </div>
-              <div>
-                <h3 className="font-semibold text-dark-100">Voicemails</h3>
-                <p className="text-xs text-dark-500">Sorted by urgency - emergency first</p>
-              </div>
+      <div className="card">
+        <div className="flex items-center justify-between mb-6">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-lg bg-warning-500/10 flex items-center justify-center">
+              <Voicemail className="w-5 h-5 text-warning-400" />
             </div>
-            <Link
-              to="/calls"
-              className="text-sm text-accent-400 hover:text-accent-300 font-medium flex items-center gap-1"
-            >
-              View all
-              <ArrowUpRight className="w-4 h-4" />
-            </Link>
+            <div>
+              <h3 className="font-semibold text-dark-100">Voicemails</h3>
+              <p className="text-xs text-dark-500">Sorted by urgency - emergency first</p>
+            </div>
           </div>
-
-          <div className="space-y-3">
-            {voicemails.map((vm) => (
-              <VoicemailCard key={vm.id} voicemail={vm} />
-            ))}
-          </div>
+          <Link
+            to="/missed-patients"
+            className="text-sm text-accent-400 hover:text-accent-300 font-medium flex items-center gap-1"
+          >
+            View all
+            <ArrowUpRight className="w-4 h-4" />
+          </Link>
         </div>
-      )}
+
+        <div className="space-y-3">
+          {voicemails.length > 0 ? (
+            voicemails.map((vm) => (
+              <VoicemailCard key={vm.id} voicemail={vm} />
+            ))
+          ) : (
+            <div className="text-center py-8">
+              <Voicemail className="w-8 h-8 text-dark-600 mx-auto mb-3" />
+              <p className="text-dark-400 text-sm">No voicemails yet</p>
+              <p className="text-dark-500 text-xs mt-1">When callers leave voicemails, they'll appear here with transcription and intent</p>
+            </div>
+          )}
+        </div>
+      </div>
 
       {/* Recent activity */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

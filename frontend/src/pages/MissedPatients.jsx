@@ -12,7 +12,13 @@ import {
   PhoneMissed,
   MessageSquare,
   CheckCircle,
-  AlertCircle
+  AlertCircle,
+  Voicemail,
+  Play,
+  AlertTriangle,
+  CalendarCheck,
+  PhoneCall,
+  HelpCircle
 } from 'lucide-react'
 
 function FollowUpStatusBadge({ status }) {
@@ -46,6 +52,26 @@ function FollowUpStatusBadge({ status }) {
     <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${styles[status] || styles.pending}`}>
       <Icon className="w-3 h-3" />
       {labels[status] || status}
+    </span>
+  )
+}
+
+function VoicemailIntentBadge({ intent }) {
+  const styles = {
+    emergency: { bg: 'bg-danger-500/10 text-danger-400 border-danger-500/20', icon: AlertTriangle, label: 'Emergency' },
+    appointment: { bg: 'bg-success-500/10 text-success-400 border-success-500/20', icon: CalendarCheck, label: 'Appointment' },
+    callback: { bg: 'bg-accent-500/10 text-accent-400 border-accent-500/20', icon: PhoneCall, label: 'Callback' },
+    inquiry: { bg: 'bg-purple-500/10 text-purple-400 border-purple-500/20', icon: HelpCircle, label: 'Inquiry' },
+    other: { bg: 'bg-dark-600/50 text-dark-400 border-dark-600/50', icon: Voicemail, label: 'Other' }
+  }
+
+  const info = styles[intent] || styles.other
+  const Icon = info.icon
+
+  return (
+    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${info.bg}`}>
+      <Icon className="w-3 h-3" />
+      {info.label}
     </span>
   )
 }
@@ -110,8 +136,46 @@ function PatientModal({ patient, onClose }) {
             </div>
           </div>
 
+          {/* Voicemail section */}
+          {patient.voicemailUrl && (
+            <div className={`p-4 rounded-lg ${patient.voicemailIntent === 'emergency' ? 'bg-danger-500/10 border border-danger-500/20' : 'bg-dark-800/50'}`}>
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <Voicemail className={`w-5 h-5 ${patient.voicemailIntent === 'emergency' ? 'text-danger-400' : 'text-warning-400'}`} />
+                  <span className="text-sm font-medium text-dark-200">Voicemail</span>
+                </div>
+                <VoicemailIntentBadge intent={patient.voicemailIntent} />
+              </div>
+
+              {patient.voicemailTranscription && (
+                <div className="mb-3">
+                  <p className="text-xs text-dark-500 mb-1">Transcription:</p>
+                  <p className="text-sm text-dark-300 italic">"{patient.voicemailTranscription}"</p>
+                </div>
+              )}
+
+              <div className="flex items-center gap-4">
+                <a
+                  href={patient.voicemailUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-2 text-sm text-accent-400 hover:text-accent-300"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <Play className="w-4 h-4" />
+                  Play voicemail
+                </a>
+                {patient.voicemailDuration && (
+                  <span className="text-xs text-dark-500">
+                    Duration: {Math.floor(patient.voicemailDuration / 60)}:{(patient.voicemailDuration % 60).toString().padStart(2, '0')}
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Contact reason if known */}
-          {patient.callReason && (
+          {patient.callReason && !patient.voicemailUrl && (
             <div>
               <p className="text-sm font-medium text-dark-300 mb-2">Reason for Contact</p>
               <div className="px-4 py-3 rounded-lg bg-dark-800/50 text-dark-200">
@@ -269,7 +333,7 @@ export default function MissedPatients() {
                   Patient
                 </th>
                 <th className="text-left px-6 py-4 text-xs font-medium text-dark-400 uppercase tracking-wider">
-                  Contact Reason
+                  Voicemail
                 </th>
                 <th className="text-left px-6 py-4 text-xs font-medium text-dark-400 uppercase tracking-wider">
                   Follow-up Status
@@ -304,7 +368,7 @@ export default function MissedPatients() {
                   <tr
                     key={patient.id}
                     onClick={() => setSelectedPatient(patient)}
-                    className="hover:bg-dark-800/30 cursor-pointer transition-colors"
+                    className={`hover:bg-dark-800/30 cursor-pointer transition-colors ${patient.voicemailIntent === 'emergency' ? 'bg-danger-500/5' : ''}`}
                   >
                     <td className="px-6 py-4">
                       <div>
@@ -315,9 +379,18 @@ export default function MissedPatients() {
                       </div>
                     </td>
                     <td className="px-6 py-4">
-                      <span className="text-sm text-dark-300">
-                        {patient.callReason || '-'}
-                      </span>
+                      {patient.voicemailUrl ? (
+                        <div className="flex flex-col gap-1">
+                          <VoicemailIntentBadge intent={patient.voicemailIntent} />
+                          {patient.voicemailTranscription && (
+                            <p className="text-xs text-dark-400 italic line-clamp-1 max-w-[200px]">
+                              "{patient.voicemailTranscription}"
+                            </p>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-xs text-dark-500">No voicemail</span>
+                      )}
                     </td>
                     <td className="px-6 py-4">
                       <FollowUpStatusBadge status={patient.followupStatus || 'pending'} />

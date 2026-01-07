@@ -52,7 +52,9 @@ router.get('/', async (req, res) => {
     // Get calls
     const result = await query(
       `SELECT id, twilio_call_sid, caller_phone, caller_name, call_reason, duration,
-              recording_url, transcription, status, sentiment, ai_summary, created_at
+              recording_url, transcription, status, sentiment, ai_summary, created_at,
+              voicemail_url, voicemail_duration, voicemail_transcription, voicemail_intent,
+              followup_status, is_missed
        FROM calls
        ${whereClause}
        ORDER BY created_at DESC
@@ -73,7 +75,13 @@ router.get('/', async (req, res) => {
         status: call.status,
         sentiment: call.sentiment,
         aiSummary: call.ai_summary,
-        createdAt: call.created_at
+        createdAt: call.created_at,
+        voicemailUrl: call.voicemail_url,
+        voicemailDuration: call.voicemail_duration,
+        voicemailTranscription: call.voicemail_transcription,
+        voicemailIntent: call.voicemail_intent,
+        followupStatus: call.followup_status,
+        isMissed: call.is_missed
       })),
       pagination: {
         page: parseInt(page),
