@@ -15,9 +15,12 @@ router.get('/stats', async (req, res) => {
       SELECT
         (SELECT COUNT(*) FROM users WHERE is_admin = false) as total_clients,
         (SELECT COUNT(*) FROM calls) as total_calls,
+        (SELECT COUNT(*) FROM calls WHERE is_missed = true) as missed_calls,
         (SELECT COUNT(*) FROM calls WHERE voicemail_url IS NOT NULL AND voicemail_duration >= 3) as total_voicemails,
+        (SELECT COUNT(*) FROM calls WHERE voicemail_intent = 'callback') as callback_requests,
         (SELECT COUNT(*) FROM leads) as total_leads,
         (SELECT COUNT(*) FROM leads WHERE status = 'converted') as converted_leads,
+        (SELECT COUNT(*) FROM leads WHERE appointment_booked = true) as booked_leads,
         (SELECT COUNT(*) FROM appointments) as total_appointments,
         (SELECT COUNT(*) FROM appointments WHERE status = 'scheduled' AND appointment_date >= CURRENT_DATE) as upcoming_appointments
     `);
@@ -28,9 +31,12 @@ router.get('/stats', async (req, res) => {
       stats: {
         totalClients: parseInt(stats.total_clients),
         totalCalls: parseInt(stats.total_calls),
+        missedCalls: parseInt(stats.missed_calls),
         totalVoicemails: parseInt(stats.total_voicemails),
+        callbackRequests: parseInt(stats.callback_requests),
         totalLeads: parseInt(stats.total_leads),
         convertedLeads: parseInt(stats.converted_leads),
+        bookedLeads: parseInt(stats.booked_leads),
         conversionRate: stats.total_leads > 0
           ? ((stats.converted_leads / stats.total_leads) * 100).toFixed(1)
           : 0,
@@ -79,10 +85,14 @@ router.get('/clients', async (req, res) => {
         s.twilio_phone,
         s.forwarding_phone,
         (SELECT COUNT(*) FROM calls c WHERE c.user_id = u.id) as total_calls,
-        (SELECT COUNT(*) FROM calls c WHERE c.user_id = u.id AND c.voicemail_url IS NOT NULL) as total_voicemails,
+        (SELECT COUNT(*) FROM calls c WHERE c.user_id = u.id AND c.is_missed = true) as missed_calls,
+        (SELECT COUNT(*) FROM calls c WHERE c.user_id = u.id AND c.voicemail_url IS NOT NULL AND c.voicemail_duration >= 3) as total_voicemails,
+        (SELECT COUNT(*) FROM calls c WHERE c.user_id = u.id AND c.voicemail_intent = 'callback') as callback_requests,
         (SELECT COUNT(*) FROM leads l WHERE l.user_id = u.id) as total_leads,
         (SELECT COUNT(*) FROM leads l WHERE l.user_id = u.id AND l.status = 'converted') as converted_leads,
-        (SELECT COUNT(*) FROM appointments a WHERE a.user_id = u.id) as total_appointments
+        (SELECT COUNT(*) FROM leads l WHERE l.user_id = u.id AND l.appointment_booked = true) as booked_leads,
+        (SELECT COUNT(*) FROM appointments a WHERE a.user_id = u.id) as total_appointments,
+        (SELECT COUNT(*) FROM appointments a WHERE a.user_id = u.id AND a.status = 'scheduled' AND a.appointment_date >= CURRENT_DATE) as upcoming_appointments
        FROM users u
        LEFT JOIN settings s ON s.user_id = u.id
        ${whereClause}
@@ -103,10 +113,14 @@ router.get('/clients', async (req, res) => {
         createdAt: client.created_at,
         stats: {
           totalCalls: parseInt(client.total_calls),
+          missedCalls: parseInt(client.missed_calls),
           totalVoicemails: parseInt(client.total_voicemails),
+          callbackRequests: parseInt(client.callback_requests),
           totalLeads: parseInt(client.total_leads),
           convertedLeads: parseInt(client.converted_leads),
-          totalAppointments: parseInt(client.total_appointments)
+          bookedLeads: parseInt(client.booked_leads),
+          totalAppointments: parseInt(client.total_appointments),
+          upcomingAppointments: parseInt(client.upcoming_appointments)
         }
       })),
       pagination: {

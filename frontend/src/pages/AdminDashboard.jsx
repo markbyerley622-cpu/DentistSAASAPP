@@ -14,7 +14,8 @@ import {
   Calendar,
   ArrowUpRight,
   Search,
-  Play
+  Play,
+  PhoneMissed
 } from 'lucide-react'
 
 function StatCard({ title, value, icon: Icon, gradient, subtitle }) {
@@ -44,38 +45,49 @@ function ClientCard({ client }) {
         <div>
           <h4 className="font-medium text-dark-100">{client.practiceName}</h4>
           <p className="text-xs text-dark-500">{client.email}</p>
+          {client.twilioPhone && (
+            <p className="text-xs text-accent-400 mt-1">
+              {client.twilioPhone}
+            </p>
+          )}
         </div>
         <div className="text-right">
           <p className="text-xs text-dark-500">
-            {new Date(client.createdAt).toLocaleDateString()}
+            Joined {new Date(client.createdAt).toLocaleDateString()}
           </p>
         </div>
       </div>
 
-      <div className="grid grid-cols-4 gap-2 text-center">
+      <div className="grid grid-cols-7 gap-1 text-center">
         <div className="p-2 rounded bg-dark-800/50">
-          <p className="text-lg font-bold text-dark-100">{client.stats.totalCalls}</p>
-          <p className="text-xs text-dark-500">Calls</p>
+          <p className="text-lg font-bold text-danger-400">{client.stats.missedCalls}</p>
+          <p className="text-[10px] text-dark-500">Missed</p>
         </div>
         <div className="p-2 rounded bg-dark-800/50">
-          <p className="text-lg font-bold text-dark-100">{client.stats.totalVoicemails}</p>
-          <p className="text-xs text-dark-500">VMs</p>
+          <p className="text-lg font-bold text-warning-400">{client.stats.totalVoicemails}</p>
+          <p className="text-[10px] text-dark-500">VMs</p>
+        </div>
+        <div className="p-2 rounded bg-dark-800/50">
+          <p className="text-lg font-bold text-purple-400">{client.stats.totalAppointments}</p>
+          <p className="text-[10px] text-dark-500">Appts</p>
+        </div>
+        <div className="p-2 rounded bg-dark-800/50">
+          <p className="text-lg font-bold text-accent-400">{client.stats.callbackRequests}</p>
+          <p className="text-[10px] text-dark-500">Callbacks</p>
         </div>
         <div className="p-2 rounded bg-dark-800/50">
           <p className="text-lg font-bold text-dark-100">{client.stats.totalLeads}</p>
-          <p className="text-xs text-dark-500">Leads</p>
+          <p className="text-[10px] text-dark-500">Leads</p>
         </div>
         <div className="p-2 rounded bg-dark-800/50">
-          <p className="text-lg font-bold text-success-400">{client.stats.convertedLeads}</p>
-          <p className="text-xs text-dark-500">Booked</p>
+          <p className="text-lg font-bold text-success-400">{client.stats.bookedLeads}</p>
+          <p className="text-[10px] text-dark-500">Booked</p>
+        </div>
+        <div className="p-2 rounded bg-dark-800/50">
+          <p className="text-lg font-bold text-blue-400">{client.stats.upcomingAppointments}</p>
+          <p className="text-[10px] text-dark-500">Upcoming</p>
         </div>
       </div>
-
-      {client.twilioPhone && (
-        <p className="mt-3 text-xs text-dark-400">
-          Twilio: {client.twilioPhone}
-        </p>
-      )}
     </div>
   )
 }
@@ -216,34 +228,48 @@ export default function AdminDashboard() {
       </div>
 
       {/* Stats Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 lg:gap-6">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 lg:gap-4">
         <StatCard
-          title="Total Clients"
+          title="Clients"
           value={stats?.totalClients || 0}
           icon={Users}
           gradient="from-accent-500 to-accent-600"
           subtitle="Active dentists"
         />
         <StatCard
-          title="Total Calls"
-          value={stats?.totalCalls || 0}
-          icon={Phone}
-          gradient="from-purple-500 to-purple-600"
-          subtitle={`${stats?.totalVoicemails || 0} voicemails`}
+          title="Missed Calls"
+          value={stats?.missedCalls || 0}
+          icon={PhoneMissed}
+          gradient="from-danger-500 to-danger-600"
+          subtitle={`${stats?.totalCalls || 0} total calls`}
         />
         <StatCard
-          title="Total Leads"
+          title="Voicemails"
+          value={stats?.totalVoicemails || 0}
+          icon={Voicemail}
+          gradient="from-warning-500 to-warning-600"
+          subtitle={`${stats?.callbackRequests || 0} callbacks`}
+        />
+        <StatCard
+          title="Leads"
           value={stats?.totalLeads || 0}
           icon={UserCheck}
-          gradient="from-warning-500 to-warning-600"
-          subtitle={`${stats?.conversionRate || 0}% conversion`}
+          gradient="from-purple-500 to-purple-600"
+          subtitle={`${stats?.conversionRate || 0}% converted`}
         />
         <StatCard
-          title="Appointments"
-          value={stats?.totalAppointments || 0}
+          title="Booked"
+          value={stats?.bookedLeads || 0}
           icon={CalendarCheck}
           gradient="from-success-500 to-success-600"
-          subtitle={`${stats?.upcomingAppointments || 0} upcoming`}
+          subtitle="Appointments made"
+        />
+        <StatCard
+          title="Upcoming"
+          value={stats?.upcomingAppointments || 0}
+          icon={Calendar}
+          gradient="from-blue-500 to-blue-600"
+          subtitle="Scheduled appts"
         />
       </div>
 
