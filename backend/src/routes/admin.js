@@ -29,19 +29,19 @@ router.get('/stats', async (req, res) => {
 
     res.json({
       stats: {
-        totalClients: parseInt(stats.total_clients),
-        totalCalls: parseInt(stats.total_calls),
-        missedCalls: parseInt(stats.missed_calls),
-        totalVoicemails: parseInt(stats.total_voicemails),
-        callbackRequests: parseInt(stats.callback_requests),
-        totalLeads: parseInt(stats.total_leads),
-        convertedLeads: parseInt(stats.converted_leads),
-        bookedLeads: parseInt(stats.booked_leads),
+        totalClients: parseInt(stats.total_clients) || 0,
+        totalCalls: parseInt(stats.total_calls) || 0,
+        missedCalls: parseInt(stats.missed_calls) || 0,
+        totalVoicemails: parseInt(stats.total_voicemails) || 0,
+        callbackRequests: parseInt(stats.callback_requests) || 0,
+        totalLeads: parseInt(stats.total_leads) || 0,
+        convertedLeads: parseInt(stats.converted_leads) || 0,
+        bookedLeads: parseInt(stats.booked_leads) || 0,
         conversionRate: stats.total_leads > 0
           ? ((stats.converted_leads / stats.total_leads) * 100).toFixed(1)
           : 0,
-        totalAppointments: parseInt(stats.total_appointments),
-        upcomingAppointments: parseInt(stats.upcoming_appointments)
+        totalAppointments: parseInt(stats.total_appointments) || 0,
+        upcomingAppointments: parseInt(stats.upcoming_appointments) || 0
       }
     });
   } catch (error) {
@@ -112,15 +112,15 @@ router.get('/clients', async (req, res) => {
         forwardingPhone: client.forwarding_phone,
         createdAt: client.created_at,
         stats: {
-          totalCalls: parseInt(client.total_calls),
-          missedCalls: parseInt(client.missed_calls),
-          totalVoicemails: parseInt(client.total_voicemails),
-          callbackRequests: parseInt(client.callback_requests),
-          totalLeads: parseInt(client.total_leads),
-          convertedLeads: parseInt(client.converted_leads),
-          bookedLeads: parseInt(client.booked_leads),
-          totalAppointments: parseInt(client.total_appointments),
-          upcomingAppointments: parseInt(client.upcoming_appointments)
+          totalCalls: parseInt(client.total_calls) || 0,
+          missedCalls: parseInt(client.missed_calls) || 0,
+          totalVoicemails: parseInt(client.total_voicemails) || 0,
+          callbackRequests: parseInt(client.callback_requests) || 0,
+          totalLeads: parseInt(client.total_leads) || 0,
+          convertedLeads: parseInt(client.converted_leads) || 0,
+          bookedLeads: parseInt(client.booked_leads) || 0,
+          totalAppointments: parseInt(client.total_appointments) || 0,
+          upcomingAppointments: parseInt(client.upcoming_appointments) || 0
         }
       })),
       pagination: {
