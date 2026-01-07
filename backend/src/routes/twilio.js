@@ -954,11 +954,10 @@ async function findNextAvailableSlot(userId, startTime, businessHours, maxDaysTo
 
 /**
  * Generate available time slots from business hours
+ * Returns 30-minute slots: 2 for today (or next open day) + 1 for tomorrow (or day after)
  */
 function getAvailableSlotsFromBusinessHours(businessHours, numSlots = 3) {
-  const slots = [];
   const now = new Date();
-  let daysChecked = 0;
 
   // Default business hours if not set
   const defaultHours = {
@@ -974,53 +973,316 @@ function getAvailableSlotsFromBusinessHours(businessHours, numSlots = 3) {
   const hours = businessHours && Object.keys(businessHours).length > 0 ? businessHours : defaultHours;
   const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 
-  while (slots.length < numSlots && daysChecked < 14) {
+  // Get all 30-minute slots for a given day
+  function getSlotsForDay(date) {
+    const dayName = dayNames[date.getDay()];
+    const dayHours = hours[dayName];
+    const daySlots = [];
+
+    if (!dayHours || !dayHours.enabled) return daySlots;
+
+    const [openHour, openMin] = dayHours.open.split(':').map(Number);
+    const [closeHour, closeMin] = dayHours.close.split(':').map(Number);
+
+    // Generate 30-minute slots throughout the day
+    let slotTime = new Date(date);
+    slotTime.setHours(openHour, openMin, 0, 0);
+
+    const closeTime = new Date(date);
+    closeTime.setHours(closeHour, closeMin, 0, 0);
+
+    // Minimum time is 1 hour from now (only for today)
+    const isToday = date.toDateString() === now.toDateString();
+    const minTime = isToday ? new Date(now.getTime() + 60 * 60 * 1000) : slotTime;
+
+    while (slotTime < closeTime) {
+      if (slotTime >= minTime) {
+        daySlots.push(new Date(slotTime));
+      }
+      slotTime = new Date(slotTime.getTime() + 30 * 60 * 1000); // Add 30 minutes
+    }
+
+    return daySlots;
+  }
+
+  // Find the first two open days
+  const result = [];
+  let daysChecked = 0;
+  let firstDaySlots = [];
+  let secondDaySlots = [];
+  let firstDayFound = false;
+
+  while (daysChecked < 14 && secondDaySlots.length === 0) {
     const checkDate = new Date(now);
     checkDate.setDate(now.getDate() + daysChecked);
 
-    const dayName = dayNames[checkDate.getDay()];
-    const dayHours = hours[dayName];
+    const daySlots = getSlotsForDay(checkDate);
 
-    if (dayHours && dayHours.enabled) {
-      const [openHour, openMin] = dayHours.open.split(':').map(Number);
-      const [closeHour, closeMin] = dayHours.close.split(':').map(Number);
-
-      // Generate morning and afternoon slots
-      const morningSlot = new Date(checkDate);
-      morningSlot.setHours(openHour, openMin, 0, 0);
-
-      const afternoonSlot = new Date(checkDate);
-      afternoonSlot.setHours(14, 0, 0, 0); // 2 PM
-
-      // Skip times in the past
-      const minTime = daysChecked === 0 ? new Date(now.getTime() + 60 * 60 * 1000) : morningSlot; // At least 1 hour from now
-
-      // Check morning slot
-      if (morningSlot >= minTime && slots.length < numSlots) {
-        slots.push(new Date(morningSlot));
-      }
-
-      // Check afternoon slot
-      if (afternoonSlot >= minTime && afternoonSlot.getHours() < closeHour && slots.length < numSlots) {
-        slots.push(new Date(afternoonSlot));
+    if (daySlots.length > 0) {
+      if (!firstDayFound) {
+        firstDaySlots = daySlots;
+        firstDayFound = true;
+      } else {
+        secondDaySlots = daySlots;
       }
     }
 
     daysChecked++;
   }
 
-  return slots;
+  // Pick 2 slots from first day (spread out - one early, one later)
+  if (firstDaySlots.length >= 2) {
+    // Pick first available and one from middle/later
+    result.push(firstDaySlots[0]);
+    const laterIndex = Math.min(Math.floor(firstDaySlots.length / 2), firstDaySlots.length - 1);
+    if (laterIndex !== 0) {
+      result.push(firstDaySlots[laterIndex]);
+    } else if (firstDaySlots.length > 1) {
+      result.push(firstDaySlots[1]);
+    }
+  } else if (firstDaySlots.length === 1) {
+    result.push(firstDaySlots[0]);
+  }
+
+  // Pick 1 slot from second day (first available)
+  if (secondDaySlots.length > 0 && result.length < numSlots) {
+    result.push(secondDaySlots[0]);
+  }
+
+  // If we still need more slots, add from what we have
+  if (result.length < numSlots && firstDaySlots.length > 2) {
+    for (let i = 1; i < firstDaySlots.length && result.length < numSlots; i++) {
+      if (!result.some(r => r.getTime() === firstDaySlots[i].getTime())) {
+        result.push(firstDaySlots[i]);
+      }
+    }
+  }
+
+  return result;
 }
 
 /**
- * Format slots for SMS message
+ * Format slots for SMS message - CONFIRM style
+ * Returns format like: "9:00 AM Wednesday CONFIRM"
  */
 function formatSlotsForSMS(slots) {
-  return slots.map((slot, i) => {
-    const day = slot.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+  return slots.map((slot) => {
+    const day = slot.toLocaleDateString('en-US', { weekday: 'long' });
     const time = slot.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
-    return `${i + 1}. ${day} at ${time}`;
+    return `${time} ${day} CONFIRM`;
   }).join('\n');
+}
+
+/**
+ * Generate a confirmation key for a slot (for matching user responses)
+ * Format: "9:00 AM Wednesday" (without CONFIRM)
+ */
+function getSlotConfirmKey(slot) {
+  const day = slot.toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
+  const time = slot.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }).toLowerCase();
+  return `${time} ${day}`;
+}
+
+/**
+ * Common typos/misspellings of "CONFIRM"
+ */
+const CONFIRM_TYPOS = [
+  'confirm', 'comfirm', 'confrim', 'confrm', 'cofirm', 'confim', 'conferm',
+  'comfrim', 'confrom', 'confiirm', 'confirn', 'confirme', 'confirmed',
+  'konfirm', 'cunfirm', 'confir', 'confrirm', 'book', 'yes', 'yep', 'yeah',
+  'ok', 'okay', 'sure', 'sounds good', 'perfect', 'great', 'thatworks', 'that works'
+];
+
+/**
+ * Day name corrections (typo -> correct)
+ */
+const DAY_CORRECTIONS = {
+  // Monday
+  'monday': 'monday', 'mon': 'monday', 'munday': 'monday', 'mondy': 'monday', 'mondya': 'monday',
+  // Tuesday
+  'tuesday': 'tuesday', 'tue': 'tuesday', 'tues': 'tuesday', 'teusday': 'tuesday', 'tuseday': 'tuesday',
+  'tusday': 'tuesday', 'tueday': 'tuesday', 'tuesdya': 'tuesday',
+  // Wednesday
+  'wednesday': 'wednesday', 'wed': 'wednesday', 'weds': 'wednesday', 'wensday': 'wednesday',
+  'wendsday': 'wednesday', 'wednsday': 'wednesday', 'wednseday': 'wednesday', 'wendesday': 'wednesday',
+  'wedesday': 'wednesday', 'wednessday': 'wednesday',
+  // Thursday
+  'thursday': 'thursday', 'thu': 'thursday', 'thurs': 'thursday', 'thrusday': 'thursday',
+  'thurday': 'thursday', 'thursdy': 'thursday', 'thurdsay': 'thursday', 'thirsday': 'thursday',
+  // Friday
+  'friday': 'friday', 'fri': 'friday', 'firday': 'friday', 'frday': 'friday', 'fridya': 'friday',
+  // Saturday
+  'saturday': 'saturday', 'sat': 'saturday', 'saterday': 'saturday', 'saturdy': 'saturday',
+  'satuday': 'saturday', 'satruday': 'saturday',
+  // Sunday
+  'sunday': 'sunday', 'sun': 'sunday', 'sundy': 'sunday', 'sudnay': 'sunday', 'sundya': 'sunday'
+};
+
+/**
+ * Check if message contains a confirm-like word
+ */
+function hasConfirmIntent(message) {
+  const lower = message.toLowerCase();
+  return CONFIRM_TYPOS.some(typo => lower.includes(typo));
+}
+
+/**
+ * Extract and correct day name from message
+ */
+function extractDayFromMessage(message) {
+  const lower = message.toLowerCase();
+
+  // Try each possible day spelling
+  for (const [typo, correct] of Object.entries(DAY_CORRECTIONS)) {
+    if (lower.includes(typo)) {
+      return correct;
+    }
+  }
+  return null;
+}
+
+/**
+ * Extract time from message (handles various formats)
+ * Returns { hour: 0-23, minutes: 0-59 } or null
+ */
+function extractTimeFromMessage(message) {
+  const lower = message.toLowerCase().replace(/\./g, ''); // Remove periods (a.m. -> am)
+
+  // Pattern: "9:30 AM", "9:30AM", "930 AM", "9 30 AM", "9AM", "9 AM"
+  const patterns = [
+    /(\d{1,2}):(\d{2})\s*(am|pm|a|p)/i,     // 9:30 AM, 9:30am, 9:30 a
+    /(\d{1,2})(\d{2})\s*(am|pm|a|p)/i,      // 930 AM, 930am
+    /(\d{1,2})\s*:\s*(\d{2})\s*(am|pm|a|p)/i, // 9 : 30 AM
+    /(\d{1,2})\s*(am|pm|a|p)/i,              // 9 AM, 9am, 9 a
+  ];
+
+  for (const pattern of patterns) {
+    const match = lower.match(pattern);
+    if (match) {
+      let hour = parseInt(match[1]);
+      let minutes = match[2] && match[2].length === 2 ? parseInt(match[2]) : 0;
+      const meridiem = (match[3] || match[2]).toLowerCase();
+
+      // Convert to 24-hour
+      const isPM = meridiem.startsWith('p');
+      const isAM = meridiem.startsWith('a');
+
+      if (isPM && hour !== 12) hour += 12;
+      if (isAM && hour === 12) hour = 0;
+
+      return { hour, minutes };
+    }
+  }
+
+  // Try just a number if it's reasonable (like "2" for 2 PM if afternoon slot exists)
+  const justNumber = lower.match(/\b(\d{1,2})\b/);
+  if (justNumber) {
+    return { hour: parseInt(justNumber[1]), minutes: 0, ambiguous: true };
+  }
+
+  return null;
+}
+
+/**
+ * Parse a CONFIRM response from user - TYPO TOLERANT
+ * Handles misspellings of CONFIRM, day names, and various time formats
+ * Returns the matching slot index or -1 if no match
+ */
+function parseConfirmResponse(message, suggestedSlots) {
+  const lower = message.toLowerCase().trim();
+
+  // Check if this looks like a confirmation attempt
+  if (!hasConfirmIntent(lower)) {
+    return -1;
+  }
+
+  // Extract day and time from message
+  const extractedDay = extractDayFromMessage(lower);
+  const extractedTime = extractTimeFromMessage(lower);
+
+  // If we got a day, try to match it to a slot
+  if (extractedDay) {
+    for (let i = 0; i < suggestedSlots.length; i++) {
+      const slotDay = suggestedSlots[i].toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
+
+      if (slotDay === extractedDay) {
+        // Day matches! Now check time if provided
+        if (extractedTime) {
+          const slotHour = suggestedSlots[i].getHours();
+          const slotMinutes = suggestedSlots[i].getMinutes();
+
+          // Handle ambiguous times (just "2" could be 2 AM or 2 PM)
+          if (extractedTime.ambiguous) {
+            // Check both AM and PM interpretations
+            if (extractedTime.hour === slotHour || extractedTime.hour + 12 === slotHour) {
+              return i;
+            }
+          } else {
+            // Exact hour match, or within 30 min (for "2" meaning "2:30")
+            if (extractedTime.hour === slotHour &&
+                (extractedTime.minutes === slotMinutes || extractedTime.minutes === 0)) {
+              return i;
+            }
+            // Also allow "2 PM" to match "2:30 PM"
+            if (extractedTime.hour === slotHour && extractedTime.minutes === 0 && slotMinutes === 30) {
+              return i;
+            }
+          }
+        } else {
+          // No time specified but day matches - if only one slot on this day, use it
+          const slotsOnThisDay = suggestedSlots.filter(s =>
+            s.toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase() === extractedDay
+          );
+          if (slotsOnThisDay.length === 1) {
+            return i;
+          }
+        }
+      }
+    }
+  }
+
+  // If we have time but no day (or day didn't match), try time-only matching
+  if (extractedTime && !extractedTime.ambiguous) {
+    for (let i = 0; i < suggestedSlots.length; i++) {
+      const slotHour = suggestedSlots[i].getHours();
+      const slotMinutes = suggestedSlots[i].getMinutes();
+
+      if (extractedTime.hour === slotHour) {
+        // If minutes match exactly or user didn't specify minutes
+        if (extractedTime.minutes === slotMinutes || extractedTime.minutes === 0) {
+          return i;
+        }
+      }
+    }
+  }
+
+  // Last resort: if user just said "confirm" or "yes" with a number
+  const numMatch = lower.match(/\b([123])\b/);
+  if (numMatch) {
+    const idx = parseInt(numMatch[1]) - 1;
+    if (idx >= 0 && idx < suggestedSlots.length) {
+      return idx;
+    }
+  }
+
+  // Super last resort: if just "confirm"/"yes" and only one slot, assume that one
+  if (suggestedSlots.length === 1) {
+    return 0;
+  }
+
+  return -1;
+}
+
+/**
+ * Normalize time string for comparison
+ */
+function normalizeTimeString(str) {
+  return str
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/(\d):(\d)/g, '$1:$2')  // Keep colons
+    .replace(/(\d)\s*(am|pm)/gi, '$1 $2')  // Normalize am/pm spacing
+    .trim();
 }
 
 /**
@@ -1041,7 +1303,32 @@ async function handleConversation(conversationId, incomingMessage, settings) {
 
   const conversation = convResult.rows[0];
   const currentStatus = conversation.status;
-  const lower = incomingMessage.toLowerCase();
+  const lower = incomingMessage.toLowerCase().trim();
+
+  // Handle special keywords first (before state machine)
+  if (lower === 'stop' || lower === 'unsubscribe' || lower === 'cancel' || lower === 'quit') {
+    await query(
+      `UPDATE conversations SET status = 'completed', ended_at = NOW() WHERE id = $1`,
+      [conversationId]
+    );
+    await query(
+      `UPDATE leads SET status = 'not_interested', notes = 'Opted out via SMS' WHERE conversation_id = $1`,
+      [conversationId]
+    );
+    return `You've been unsubscribed. Reply START to opt back in. Contact ${practiceName} directly if you need assistance.`;
+  }
+
+  if (lower === 'start' || lower === 'subscribe') {
+    await query(
+      `UPDATE conversations SET status = 'active' WHERE id = $1`,
+      [conversationId]
+    );
+    return `Welcome back! Reply 1 for a callback, or 2 to schedule an appointment with ${practiceName}.`;
+  }
+
+  if (lower === 'help' || lower === 'info' || lower === '?') {
+    return `${practiceName} SMS Booking:\n- Reply 1 for a callback\n- Reply 2 to book an appointment\n- Reply STOP to opt out\n\nNeed help? Call us directly!`;
+  }
 
   // Handle based on current state
   switch (currentStatus) {
@@ -1105,17 +1392,14 @@ async function handleConversation(conversationId, incomingMessage, settings) {
         [intent === 'callback' ? 'Wants callback' : 'Wants appointment', conversationId]
       );
 
-      const actionText = intent === 'callback' ? 'call you back' : 'schedule you';
+      const actionText = intent === 'callback' ? 'call you back' : 'book you in';
       const formattedTimes = formatSlotsForSMS(slots);
 
-      return `Great! We can ${actionText} at any of these times. Just reply with the number:\n\n${formattedTimes}\n\nOr let us know a different time that works!`;
+      return `Great! We can ${actionText} at these times. Reply with your choice to book:\n\n${formattedTimes}\n\nOr reply DIFFERENT for other options.`;
     }
 
     case 'awaiting_time_selection': {
-      // They're selecting a time
-      const selectedIndex = parseTimeSelection(incomingMessage);
-
-      // Get the suggested times from system message
+      // Get the suggested times from system message first
       const systemMsgResult = await query(
         `SELECT content FROM messages
          WHERE conversation_id = $1 AND message_type = 'system'
@@ -1136,16 +1420,25 @@ async function handleConversation(conversationId, incomingMessage, settings) {
       const suggestedTimes = systemData.suggested_times.map(t => new Date(t));
       const intent = systemData.intent || 'appointment';
 
-      // Handle YES confirmation for "next available" single slot offer
+      // Try to parse CONFIRM response (e.g., "9:00 AM Wednesday CONFIRM")
+      let selectedIndex = parseConfirmResponse(incomingMessage, suggestedTimes);
+
+      // Also support number selection as fallback (1, 2, 3)
+      if (selectedIndex === -1) {
+        selectedIndex = parseTimeSelection(incomingMessage);
+      }
+
+      // Handle YES confirmation for "next available" single slot offer (double-booking recovery)
       const userIntent = detectIntent(incomingMessage);
       if (userIntent === 'confirm' && suggestedTimes.length === 1 && systemData.original_choice_taken) {
-        // They're confirming the next available slot we offered
         selectedIndex = 0;
       }
 
       if (selectedIndex === -1 || selectedIndex >= suggestedTimes.length) {
         // Check if they want a different time or callback
-        if (lower.includes('different') || lower.includes('other') || lower.includes('none')) {
+        if (lower.includes('different') || lower.includes('other') || lower.includes('none') ||
+            lower.includes('call me') || lower.includes('callback') || lower.includes('call back') ||
+            lower.includes('ring me') || lower.includes('phone me')) {
           await query(
             `UPDATE conversations SET status = 'callback_requested' WHERE id = $1`,
             [conversationId]
@@ -1156,12 +1449,16 @@ async function handleConversation(conversationId, incomingMessage, settings) {
             [conversationId]
           );
 
-          return `No problem! We'll have someone from ${practiceName} call you to find a time that works better. What's the best time to reach you?`;
+          return `No problem! We'll have someone from ${practiceName} call you to find a time that works better.`;
         }
 
-        // Didn't understand
+        // Didn't understand - show helpful instructions
         const formattedTimes = formatSlotsForSMS(suggestedTimes);
-        return `I didn't catch which time you'd prefer. Could you reply with 1, 2, or 3?\n\n${formattedTimes}`;
+        const exampleSlot = suggestedTimes[0];
+        const exampleDay = exampleSlot.toLocaleDateString('en-US', { weekday: 'long' });
+        const exampleTime = exampleSlot.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+
+        return `No worries! Just copy and send one of these to book:\n\n${formattedTimes}\n\nExample: "${exampleTime} ${exampleDay} CONFIRM"\n\nOr reply CALL ME to request a callback.`;
       }
 
       // Valid selection!
@@ -1197,14 +1494,10 @@ async function handleConversation(conversationId, incomingMessage, settings) {
           const nextSlot = await findNextAvailableSlot(settings.user_id, selectedTime, settings.business_hours);
 
           if (nextSlot) {
-            const nextFormatted = nextSlot.toLocaleString('en-US', {
-              weekday: 'long',
-              month: 'long',
-              day: 'numeric',
-              hour: 'numeric',
-              minute: '2-digit',
-              hour12: true
-            });
+            // Format as CONFIRM style
+            const nextDay = nextSlot.toLocaleDateString('en-US', { weekday: 'long' });
+            const nextTime = nextSlot.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+            const nextConfirmFormat = `${nextTime} ${nextDay} CONFIRM`;
 
             // Store the new suggested time for next response
             await query(
@@ -1214,7 +1507,7 @@ async function handleConversation(conversationId, incomingMessage, settings) {
               [JSON.stringify({ suggested_times: [nextSlot], intent, original_choice_taken: true }), conversationId]
             );
 
-            return `Sorry, that time was just booked! The next available slot is ${nextFormatted}. Reply YES to confirm, or let us know another time that works.`;
+            return `Sorry, that time was just booked! Next available:\n\n${nextConfirmFormat}\n\nReply with the above to book, or DIFFERENT for other options.`;
           } else {
             return `Sorry, that time was just booked and we're quite full. We'll have someone call you to find a time that works.`;
           }
@@ -1248,8 +1541,8 @@ async function handleConversation(conversationId, incomingMessage, settings) {
 
         // Create appointment record
         await client.query(
-          `INSERT INTO appointments (user_id, lead_id, patient_phone, appointment_date, appointment_time, reason, status)
-           SELECT c.user_id, l.id, c.caller_phone, $1::date, $2, $3, 'scheduled'
+          `INSERT INTO appointments (user_id, lead_id, patient_name, patient_phone, appointment_date, appointment_time, reason, status)
+           SELECT c.user_id, l.id, COALESCE(NULLIF(l.name, ''), 'SMS Booking'), c.caller_phone, $1::date, $2, $3, 'scheduled'
            FROM conversations c
            LEFT JOIN leads l ON l.conversation_id = c.id
            WHERE c.id = $4`,
@@ -1259,10 +1552,11 @@ async function handleConversation(conversationId, incomingMessage, settings) {
         await client.query('COMMIT');
         client.release();
 
+        const actionWord = intent === 'callback' ? 'CALLBACK' : 'APPOINTMENT';
         if (settings.booking_mode === 'auto') {
-          return `Perfect! You're all set for ${formattedTime}. We look forward to seeing you at ${practiceName}!`;
+          return `SCHEDULED! Your ${actionWord.toLowerCase()} is booked for ${formattedTime} at ${practiceName}. See you then!`;
         } else {
-          return `Thanks! We've noted your preference for ${formattedTime}. Our team at ${practiceName} will confirm with you shortly!`;
+          return `RECEIVED! Your ${actionWord.toLowerCase()} request for ${formattedTime} has been submitted. ${practiceName} will confirm shortly.`;
         }
       } catch (txError) {
         await client.query('ROLLBACK');
