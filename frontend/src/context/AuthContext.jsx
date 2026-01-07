@@ -18,6 +18,7 @@ export function AuthProvider({ children }) {
         } catch (error) {
           console.error('Failed to fetch user:', error)
           localStorage.removeItem('token')
+          localStorage.removeItem('refreshToken')
           localStorage.removeItem('user')
         }
       }
@@ -29,8 +30,9 @@ export function AuthProvider({ children }) {
 
   const login = async (email, password) => {
     const response = await authAPI.login({ email, password })
-    const { user, token } = response.data
+    const { user, token, refreshToken } = response.data
     localStorage.setItem('token', token)
+    localStorage.setItem('refreshToken', refreshToken)
     localStorage.setItem('user', JSON.stringify(user))
     setUser(user)
     return user
@@ -38,15 +40,23 @@ export function AuthProvider({ children }) {
 
   const register = async (data) => {
     const response = await authAPI.register(data)
-    const { user, token } = response.data
+    const { user, token, refreshToken } = response.data
     localStorage.setItem('token', token)
+    localStorage.setItem('refreshToken', refreshToken)
     localStorage.setItem('user', JSON.stringify(user))
     setUser(user)
     return user
   }
 
-  const logout = () => {
+  const logout = async () => {
+    try {
+      // Revoke refresh token on server
+      await authAPI.logout()
+    } catch (error) {
+      console.error('Logout error:', error)
+    }
     localStorage.removeItem('token')
+    localStorage.removeItem('refreshToken')
     localStorage.removeItem('user')
     setUser(null)
   }

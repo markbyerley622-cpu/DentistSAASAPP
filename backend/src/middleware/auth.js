@@ -1,4 +1,5 @@
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const { query } = require('../db/config');
 
 // Require JWT_SECRET in production - fail fast if not set
@@ -10,11 +11,60 @@ if (!JWT_SECRET && process.env.NODE_ENV === 'production') {
 
 // Use a development-only fallback (never used in production due to check above)
 const SECRET = JWT_SECRET || 'dev-only-secret-not-for-production';
-const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
 
-// Generate JWT token
+// Token expiry times
+const ACCESS_TOKEN_EXPIRES = '15m'; // Short-lived access token
+const REFRESH_TOKEN_EXPIRES = '7d'; // Long-lived refresh token
+const REFRESH_TOKEN_EXPIRES_MS = 7 * 24 * 60 * 60 * 1000; // 7 days in ms
+
+/**
+ * Generate access token (short-lived JWT)
+ */
 const generateToken = (userId) => {
-  return jwt.sign({ userId }, SECRET, { expiresIn: JWT_EXPIRES_IN });
+  return jwt.sign({ userId, type: 'access' }, SECRET, { expiresIn: ACCESS_TOKEN_EXPIRES });
+};
+
+/**
+ * Generate refresh token (random string stored in database)
+ */
+const generateRefreshToken = async (userId) => {
+  const token = crypto.randomBytes(64).toString('hex');
+  const expiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRES_MS);
+
+  // Store in database (will need migration)
+  await query(
+    `INSERT INTO refresh_tokens (user_id, token, expires_at)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (user_id) DO UPDATE
+     SET token = EXCLUDED.token, expires_at = EXCLUDED.expires_at, created_at = NOW()`,
+    [userId, token, expiresAt]
+  );
+
+  return { token, expiresAt };
+};
+
+/**
+ * Validate refresh token and return user ID if valid
+ */
+const validateRefreshToken = async (token) => {
+  const result = await query(
+    `SELECT user_id FROM refresh_tokens
+     WHERE token = $1 AND expires_at > NOW()`,
+    [token]
+  );
+
+  if (result.rows.length === 0) {
+    return null;
+  }
+
+  return result.rows[0].user_id;
+};
+
+/**
+ * Revoke refresh token (for logout)
+ */
+const revokeRefreshToken = async (userId) => {
+  await query('DELETE FROM refresh_tokens WHERE user_id = $1', [userId]);
 };
 
 // Verify JWT token
@@ -50,9 +100,9 @@ const authenticate = async (req, res, next) => {
       next();
     } catch (jwtError) {
       if (jwtError.name === 'TokenExpiredError') {
-        return res.status(401).json({ error: { message: 'Token expired' } });
+        return res.status(401).json({ error: { message: 'Token expired', code: 'TOKEN_EXPIRED' } });
       }
-      return res.status(401).json({ error: { message: 'Invalid token' } });
+      return res.status(401).json({ error: { message: 'Invalid token', code: 'INVALID_TOKEN' } });
     }
   } catch (error) {
     console.error('Auth middleware error:', error);
@@ -106,6 +156,9 @@ const optionalAuth = async (req, res, next) => {
 
 module.exports = {
   generateToken,
+  generateRefreshToken,
+  validateRefreshToken,
+  revokeRefreshToken,
   verifyToken,
   authenticate,
   authenticateAdmin,

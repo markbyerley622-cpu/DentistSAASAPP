@@ -135,19 +135,20 @@ router.get('/calls-by-day', async (req, res) => {
     const userId = req.user.id;
     const { days = 14 } = req.query;
 
+    const daysInt = Math.min(Math.max(parseInt(days) || 14, 1), 365); // Sanitize: 1-365 days
     const result = await query(
       `SELECT DATE(created_at) as date, COUNT(*) as count
        FROM calls
-       WHERE user_id = $1 AND created_at >= NOW() - INTERVAL '${parseInt(days)} days'
+       WHERE user_id = $1 AND created_at >= NOW() - INTERVAL '1 day' * $2
        GROUP BY DATE(created_at)
        ORDER BY date`,
-      [userId]
+      [userId, daysInt]
     );
 
     // Fill in missing days with 0
     const data = [];
     const today = new Date();
-    for (let i = parseInt(days) - 1; i >= 0; i--) {
+    for (let i = daysInt - 1; i >= 0; i--) {
       const date = new Date(today);
       date.setDate(date.getDate() - i);
       const dateStr = date.toISOString().split('T')[0];
@@ -204,16 +205,17 @@ router.get('/call-reasons', async (req, res) => {
     const userId = req.user.id;
     const { days = 30 } = req.query;
 
+    const daysInt = Math.min(Math.max(parseInt(days) || 30, 1), 365); // Sanitize: 1-365 days
     const result = await query(
       `SELECT call_reason, COUNT(*) as count
        FROM calls
        WHERE user_id = $1
-         AND created_at >= NOW() - INTERVAL '${parseInt(days)} days'
+         AND created_at >= NOW() - INTERVAL '1 day' * $2
          AND call_reason IS NOT NULL
        GROUP BY call_reason
        ORDER BY count DESC
        LIMIT 10`,
-      [userId]
+      [userId, daysInt]
     );
 
     res.json({
@@ -234,13 +236,14 @@ router.get('/peak-hours', async (req, res) => {
     const userId = req.user.id;
     const { days = 30 } = req.query;
 
+    const daysInt = Math.min(Math.max(parseInt(days) || 30, 1), 365); // Sanitize: 1-365 days
     const result = await query(
       `SELECT EXTRACT(HOUR FROM created_at) as hour, COUNT(*) as count
        FROM calls
-       WHERE user_id = $1 AND created_at >= NOW() - INTERVAL '${parseInt(days)} days'
+       WHERE user_id = $1 AND created_at >= NOW() - INTERVAL '1 day' * $2
        GROUP BY EXTRACT(HOUR FROM created_at)
        ORDER BY hour`,
-      [userId]
+      [userId, daysInt]
     );
 
     // Fill in all 24 hours

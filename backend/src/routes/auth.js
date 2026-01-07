@@ -4,29 +4,27 @@ const twilio = require('twilio');
 const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
 const { query } = require('../db/config');
-const { generateToken, authenticate } = require('../middleware/auth');
+const { generateToken, generateRefreshToken, validateRefreshToken, revokeRefreshToken, authenticate } = require('../middleware/auth');
+const { validate, schemas } = require('../middleware/validate');
 
 const router = express.Router();
 
 // Rate limiting for authentication endpoints to prevent brute force attacks
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5, // 5 attempts per window
+  max: process.env.NODE_ENV === 'production' ? 5 : 100, // Strict in prod, lenient in dev
   message: { error: { message: 'Too many attempts. Please try again in 15 minutes.' } },
   standardHeaders: true,
-  legacyHeaders: false,
-  // Skip rate limiting in development for easier testing
-  skip: () => process.env.NODE_ENV !== 'production'
+  legacyHeaders: false
 });
 
 // Stricter rate limit for password reset (OTP) to prevent SMS abuse
 const otpLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
-  max: 3, // 3 OTP requests per hour per IP
+  max: process.env.NODE_ENV === 'production' ? 3 : 100, // 3 OTP requests per hour in prod
   message: { error: { message: 'Too many password reset requests. Please try again in an hour.' } },
   standardHeaders: true,
-  legacyHeaders: false,
-  skip: () => process.env.NODE_ENV !== 'production'
+  legacyHeaders: false
 });
 
 // Initialize Twilio client for OTP (uses platform credentials from env)
@@ -72,22 +70,9 @@ const formatPhoneForTwilio = (phone) => {
 };
 
 // POST /api/auth/register
-router.post('/register', authLimiter, async (req, res) => {
+router.post('/register', authLimiter, validate(schemas.register), async (req, res) => {
   try {
     const { email, password, practiceName, phone, timezone } = req.body;
-
-    // Validation
-    if (!email || !password || !practiceName) {
-      return res.status(400).json({
-        error: { message: 'Email, password, and practice name are required' }
-      });
-    }
-
-    if (password.length < 8) {
-      return res.status(400).json({
-        error: { message: 'Password must be at least 8 characters' }
-      });
-    }
 
     // Check if user exists
     const existingUser = await query('SELECT id FROM users WHERE email = $1', [email.toLowerCase()]);
@@ -117,8 +102,9 @@ router.post('/register', authLimiter, async (req, res) => {
       [user.id]
     );
 
-    // Generate token
-    const token = generateToken(user.id);
+    // Generate tokens
+    const accessToken = generateToken(user.id);
+    const refreshToken = await generateRefreshToken(user.id);
 
     res.status(201).json({
       message: 'Account created successfully',
@@ -131,7 +117,9 @@ router.post('/register', authLimiter, async (req, res) => {
         isAdmin: false,
         createdAt: user.created_at
       },
-      token
+      token: accessToken,
+      refreshToken: refreshToken.token,
+      expiresIn: 900 // 15 minutes in seconds
     });
   } catch (error) {
     console.error('Registration error:', error);
@@ -140,15 +128,9 @@ router.post('/register', authLimiter, async (req, res) => {
 });
 
 // POST /api/auth/login
-router.post('/login', authLimiter, async (req, res) => {
+router.post('/login', authLimiter, validate(schemas.login), async (req, res) => {
   try {
     const { email, password } = req.body;
-
-    if (!email || !password) {
-      return res.status(400).json({
-        error: { message: 'Email and password are required' }
-      });
-    }
 
     // Find user
     const result = await query(
@@ -172,8 +154,9 @@ router.post('/login', authLimiter, async (req, res) => {
       });
     }
 
-    // Generate token
-    const token = generateToken(user.id);
+    // Generate tokens
+    const accessToken = generateToken(user.id);
+    const refreshToken = await generateRefreshToken(user.id);
 
     res.json({
       user: {
@@ -185,7 +168,9 @@ router.post('/login', authLimiter, async (req, res) => {
         isAdmin: user.is_admin || false,
         createdAt: user.created_at
       },
-      token
+      token: accessToken,
+      refreshToken: refreshToken.token,
+      expiresIn: 900 // 15 minutes in seconds
     });
   } catch (error) {
     console.error('Login error:', error);
@@ -248,22 +233,10 @@ router.put('/profile', authenticate, async (req, res) => {
 });
 
 // PUT /api/auth/password
-router.put('/password', authenticate, async (req, res) => {
+router.put('/password', authenticate, validate(schemas.updatePassword), async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
     const userId = req.user.id;
-
-    if (!currentPassword || !newPassword) {
-      return res.status(400).json({
-        error: { message: 'Current password and new password are required' }
-      });
-    }
-
-    if (newPassword.length < 8) {
-      return res.status(400).json({
-        error: { message: 'New password must be at least 8 characters' }
-      });
-    }
 
     // Get current password hash
     const userResult = await query('SELECT password_hash FROM users WHERE id = $1', [userId]);
@@ -289,15 +262,9 @@ router.put('/password', authenticate, async (req, res) => {
 });
 
 // POST /api/auth/forgot-password - Request OTP for password reset
-router.post('/forgot-password', otpLimiter, async (req, res) => {
+router.post('/forgot-password', otpLimiter, validate(schemas.forgotPassword), async (req, res) => {
   try {
     const { phone } = req.body;
-
-    if (!phone) {
-      return res.status(400).json({
-        error: { message: 'Phone number is required' }
-      });
-    }
 
     // Clean phone number (remove non-digits)
     const cleanPhone = phone.replace(/\D/g, '');
@@ -365,15 +332,9 @@ router.post('/forgot-password', otpLimiter, async (req, res) => {
 });
 
 // POST /api/auth/verify-otp - Verify OTP and get reset token
-router.post('/verify-otp', authLimiter, async (req, res) => {
+router.post('/verify-otp', authLimiter, validate(schemas.verifyOtp), async (req, res) => {
   try {
     const { phone, code } = req.body;
-
-    if (!phone || !code) {
-      return res.status(400).json({
-        error: { message: 'Phone number and code are required' }
-      });
-    }
 
     const cleanPhone = phone.replace(/\D/g, '');
 
@@ -433,21 +394,9 @@ router.post('/verify-otp', authLimiter, async (req, res) => {
 });
 
 // POST /api/auth/reset-password - Reset password with token
-router.post('/reset-password', authLimiter, async (req, res) => {
+router.post('/reset-password', authLimiter, validate(schemas.resetPassword), async (req, res) => {
   try {
     const { phone, resetToken, newPassword } = req.body;
-
-    if (!phone || !resetToken || !newPassword) {
-      return res.status(400).json({
-        error: { message: 'Phone, reset token, and new password are required' }
-      });
-    }
-
-    if (newPassword.length < 8) {
-      return res.status(400).json({
-        error: { message: 'Password must be at least 8 characters' }
-      });
-    }
 
     const cleanPhone = phone.replace(/\D/g, '');
 
@@ -493,6 +442,58 @@ router.post('/reset-password', authLimiter, async (req, res) => {
   } catch (error) {
     console.error('Reset password error:', error);
     res.status(500).json({ error: { message: 'Failed to reset password' } });
+  }
+});
+
+// POST /api/auth/refresh - Refresh access token using refresh token
+router.post('/refresh', async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+
+    if (!refreshToken) {
+      return res.status(400).json({
+        error: { message: 'Refresh token is required' }
+      });
+    }
+
+    // Validate refresh token
+    const userId = await validateRefreshToken(refreshToken);
+
+    if (!userId) {
+      return res.status(401).json({
+        error: { message: 'Invalid or expired refresh token', code: 'REFRESH_TOKEN_INVALID' }
+      });
+    }
+
+    // Generate new access token
+    const accessToken = generateToken(userId);
+
+    // Optionally rotate refresh token for extra security
+    const newRefreshToken = await generateRefreshToken(userId);
+
+    res.json({
+      token: accessToken,
+      refreshToken: newRefreshToken.token,
+      expiresIn: 900 // 15 minutes in seconds
+    });
+  } catch (error) {
+    console.error('Token refresh error:', error);
+    res.status(500).json({ error: { message: 'Failed to refresh token' } });
+  }
+});
+
+// POST /api/auth/logout - Revoke refresh token
+router.post('/logout', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    // Revoke refresh token
+    await revokeRefreshToken(userId);
+
+    res.json({ message: 'Logged out successfully' });
+  } catch (error) {
+    console.error('Logout error:', error);
+    res.status(500).json({ error: { message: 'Failed to logout' } });
   }
 });
 

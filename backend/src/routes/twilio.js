@@ -1,34 +1,19 @@
 const express = require('express');
 const twilio = require('twilio');
-const crypto = require('crypto');
+const rateLimit = require('express-rate-limit');
 const { query, getClient } = require('../db/config');
 const { authenticate } = require('../middleware/auth');
+const { decrypt } = require('../utils/crypto');
+const { validate, schemas } = require('../middleware/validate');
 
-// Decryption for Twilio auth tokens (must match settings.js encryption)
-const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'dev-only-32-char-key-not-prod!!';
-const IV_LENGTH = 16;
-
-function decryptAuthToken(text) {
-  if (!text) return null;
-  try {
-    // Check if it's encrypted (contains colon separator)
-    if (!text.includes(':')) {
-      // Not encrypted (legacy data), return as-is
-      return text;
-    }
-    const textParts = text.split(':');
-    const iv = Buffer.from(textParts.shift(), 'hex');
-    const encryptedText = Buffer.from(textParts.join(':'), 'hex');
-    const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(ENCRYPTION_KEY), iv);
-    let decrypted = decipher.update(encryptedText);
-    decrypted = Buffer.concat([decrypted, decipher.final()]);
-    return decrypted.toString();
-  } catch (error) {
-    console.error('Auth token decryption error:', error.message);
-    // Return original text if decryption fails (legacy unencrypted data)
-    return text;
-  }
-}
+// Rate limiter for SMS sending - prevents abuse
+const smsLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: process.env.NODE_ENV === 'production' ? 10 : 100, // 10 SMS per minute in prod
+  message: { error: { message: 'Too many SMS requests. Please slow down.' } },
+  standardHeaders: true,
+  legacyHeaders: false
+});
 
 const router = express.Router();
 
@@ -84,7 +69,7 @@ async function validateTwilioWebhook(req, res, next) {
     }
 
     // Decrypt the auth token
-    const authToken = decryptAuthToken(encryptedAuthToken);
+    const authToken = decrypt(encryptedAuthToken);
 
     // Build the full URL that Twilio used to sign the request
     const protocol = req.headers['x-forwarded-proto'] || req.protocol;
@@ -414,7 +399,7 @@ router.post('/voice/voicemail-complete', validateTwilioWebhook, async (req, res)
     console.log(`No voicemail, no cooldown - sending SMS follow-up to ${originalFrom}`);
 
     if (settings.twilio_account_sid && settings.twilio_auth_token) {
-      const decryptedToken = decryptAuthToken(settings.twilio_auth_token);
+      const decryptedToken = decrypt(settings.twilio_auth_token);
       const client = twilio(settings.twilio_account_sid, decryptedToken);
 
       const practiceName = settings.practice_name || 'our practice';
@@ -655,7 +640,7 @@ router.post('/call/missed', validateTwilioWebhook, async (req, res) => {
 
     // Send SMS follow-up using Twilio client
     if (settings.twilio_account_sid && settings.twilio_auth_token) {
-      const decryptedToken = decryptAuthToken(settings.twilio_auth_token);
+      const decryptedToken = decrypt(settings.twilio_auth_token);
       const client = twilio(settings.twilio_account_sid, decryptedToken);
 
       const message = await client.messages.create({
@@ -782,14 +767,10 @@ router.post('/test', async (req, res) => {
 });
 
 // POST /api/twilio/send-sms - Send a manual SMS to a patient
-router.post('/send-sms', async (req, res) => {
+router.post('/send-sms', smsLimiter, validate(schemas.sendSms), async (req, res) => {
   try {
     const userId = req.user.id;
     const { to, message, conversationId } = req.body;
-
-    if (!to || !message) {
-      return res.status(400).json({ error: { message: 'Recipient and message are required' } });
-    }
 
     const settingsResult = await query(
       'SELECT twilio_account_sid, twilio_auth_token, twilio_phone FROM settings WHERE user_id = $1',
