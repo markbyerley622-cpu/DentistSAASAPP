@@ -14,6 +14,7 @@ const settingsRoutes = require('./routes/settings');
 const bookingSlotsRoutes = require('./routes/bookingSlots');
 const conversationsRoutes = require('./routes/conversations');
 const appointmentsRoutes = require('./routes/appointments');
+const adminRoutes = require('./routes/admin');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -45,6 +46,7 @@ app.use('/api/settings', settingsRoutes);
 app.use('/api/booking-slots', bookingSlotsRoutes);
 app.use('/api/conversations', conversationsRoutes);
 app.use('/api/appointments', appointmentsRoutes);
+app.use('/api/admin', adminRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {

@@ -11,7 +11,8 @@ import {
   ChevronRight,
   Menu,
   X,
-  Sparkles
+  Sparkles,
+  Shield
 } from 'lucide-react'
 
 const navigation = [
@@ -19,6 +20,10 @@ const navigation = [
   { name: 'Missed Patients', href: '/missed-patients', icon: PhoneMissed },
   { name: 'Follow-ups', href: '/leads', icon: Users },
   { name: 'Settings', href: '/settings', icon: Settings },
+]
+
+const adminNavigation = [
+  { name: 'Admin Panel', href: '/admin', icon: Shield },
 ]
 
 function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
@@ -67,6 +72,38 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
             </NavLink>
           )
         })}
+
+        {/* Admin Navigation - only show if user is admin */}
+        {user?.isAdmin && (
+          <>
+            <div className="my-3 border-t border-dark-700/50" />
+            {adminNavigation.map((item) => {
+              const isActive = location.pathname === item.href
+              return (
+                <NavLink
+                  key={item.name}
+                  to={item.href}
+                  onClick={() => setMobileOpen(false)}
+                  className={`flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-200 group ${
+                    isActive
+                      ? 'bg-purple-600/10 text-purple-400 shadow-inner-glow'
+                      : 'text-purple-400/70 hover:text-purple-400 hover:bg-purple-800/20'
+                  }`}
+                >
+                  <item.icon className={`w-5 h-5 flex-shrink-0 transition-colors ${
+                    isActive ? 'text-purple-400' : 'text-purple-500/70 group-hover:text-purple-400'
+                  }`} />
+                  {!collapsed && (
+                    <span className="font-medium animate-fade-in">{item.name}</span>
+                  )}
+                  {isActive && !collapsed && (
+                    <div className="ml-auto w-1.5 h-1.5 rounded-full bg-purple-400 animate-pulse-slow" />
+                  )}
+                </NavLink>
+              )
+            })}
+          </>
+        )}
       </nav>
 
       {/* User section */}

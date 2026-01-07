@@ -128,6 +128,7 @@ router.post('/register', authLimiter, async (req, res) => {
         practiceName: user.practice_name,
         phone: user.phone,
         timezone: user.timezone,
+        isAdmin: false,
         createdAt: user.created_at
       },
       token
@@ -151,7 +152,7 @@ router.post('/login', authLimiter, async (req, res) => {
 
     // Find user
     const result = await query(
-      'SELECT id, email, password_hash, practice_name, phone, timezone, created_at FROM users WHERE email = $1',
+      'SELECT id, email, password_hash, practice_name, phone, timezone, is_admin, created_at FROM users WHERE email = $1',
       [email.toLowerCase()]
     );
 
@@ -181,6 +182,7 @@ router.post('/login', authLimiter, async (req, res) => {
         practiceName: user.practice_name,
         phone: user.phone,
         timezone: user.timezone,
+        isAdmin: user.is_admin || false,
         createdAt: user.created_at
       },
       token
@@ -201,6 +203,7 @@ router.get('/me', authenticate, async (req, res) => {
         practiceName: req.user.practice_name,
         phone: req.user.phone,
         timezone: req.user.timezone,
+        isAdmin: req.user.is_admin || false,
         createdAt: req.user.created_at
       }
     });

@@ -121,4 +121,14 @@ export const appointmentsAPI = {
   getStats: () => api.get('/appointments/stats/overview'),
 }
 
+// Admin API (requires admin role)
+export const adminAPI = {
+  getStats: () => api.get('/admin/stats'),
+  getClients: (params) => api.get('/admin/clients', { params }),
+  getClient: (id) => api.get(`/admin/client/${id}`),
+  getVoicemails: (params) => api.get('/admin/voicemails', { params }),
+  getLeads: (params) => api.get('/admin/leads', { params }),
+  getCalls: (params) => api.get('/admin/calls', { params }),
+}
+
 export default api

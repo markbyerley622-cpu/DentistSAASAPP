@@ -36,9 +36,9 @@ const authenticate = async (req, res, next) => {
     try {
       const decoded = verifyToken(token);
 
-      // Fetch user from database
+      // Fetch user from database (include is_admin)
       const result = await query(
-        'SELECT id, email, practice_name, phone, timezone, created_at FROM users WHERE id = $1',
+        'SELECT id, email, practice_name, phone, timezone, is_admin, created_at FROM users WHERE id = $1',
         [decoded.userId]
       );
 
@@ -58,6 +58,19 @@ const authenticate = async (req, res, next) => {
     console.error('Auth middleware error:', error);
     return res.status(500).json({ error: { message: 'Authentication error' } });
   }
+};
+
+// Admin middleware - requires admin role (must be used after authenticate)
+const authenticateAdmin = (req, res, next) => {
+  if (!req.user) {
+    return res.status(401).json({ error: { message: 'Authentication required' } });
+  }
+
+  if (!req.user.is_admin) {
+    return res.status(403).json({ error: { message: 'Admin access required' } });
+  }
+
+  next();
 };
 
 // Optional auth - attaches user if token exists, but doesn't require it
@@ -95,5 +108,6 @@ module.exports = {
   generateToken,
   verifyToken,
   authenticate,
+  authenticateAdmin,
   optionalAuth
 };
