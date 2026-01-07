@@ -226,12 +226,14 @@ router.post('/voice/dial-status', validateTwilioWebhook, async (req, res) => {
       twiml.say({ voice: 'alice' }, `Sorry we missed your call at ${practiceName}. Please leave a message after the beep, or simply hang up and we'll text you shortly.`);
 
       // Record voicemail with callback to check if they actually left one
+      // Enable transcription to classify caller intent
       twiml.record({
         action: `/api/twilio/voice/voicemail-complete?originalFrom=${encodeURIComponent(originalFrom)}&twilioNumber=${encodeURIComponent(twilioNumber)}&callSid=${encodeURIComponent(CallSid)}`,
         method: 'POST',
         maxLength: 120, // 2 minutes max
         timeout: 5, // 5 seconds of silence = done
-        transcribe: false,
+        transcribe: true, // Enable transcription for intent classification
+        transcribeCallback: `/api/twilio/voice/transcription-complete`,
         playBeep: true
       });
 
@@ -251,6 +253,58 @@ router.post('/voice/dial-status', validateTwilioWebhook, async (req, res) => {
 
 // SMS cooldown in minutes - don't spam the same caller
 const SMS_COOLDOWN_MINUTES = 30;
+
+/**
+ * Classify voicemail intent from transcription using keyword rules
+ * No AI - pure deterministic matching
+ */
+function classifyVoicemailIntent(transcription) {
+  if (!transcription) return 'other';
+  const text = transcription.toLowerCase();
+
+  // Emergency keywords - highest priority
+  if (/emergency|pain|hurt|aching|urgent|bleeding|broken|cracked|swollen|abscess|infection/.test(text)) {
+    return 'emergency';
+  }
+
+  // Appointment/booking keywords
+  if (/appointment|book|schedule|available|slot|come in|visit|check.?up|cleaning|exam/.test(text)) {
+    return 'appointment';
+  }
+
+  // Callback request keywords
+  if (/call.*back|return.*call|callback|ring.*back|get back to|reach me|contact me/.test(text)) {
+    return 'callback';
+  }
+
+  // General inquiry keywords
+  if (/question|wondering|information|how much|cost|price|insurance|hours|open|location/.test(text)) {
+    return 'inquiry';
+  }
+
+  return 'other';
+}
+
+/**
+ * Get transcription from Twilio recording
+ * Uses Twilio's built-in transcription or returns null
+ */
+async function getVoicemailTranscription(client, recordingSid) {
+  try {
+    // Twilio can provide transcription if enabled
+    const transcription = await client.recordings(recordingSid)
+      .transcriptions
+      .list({ limit: 1 });
+
+    if (transcription.length > 0) {
+      return transcription[0].transcriptionText;
+    }
+    return null;
+  } catch (error) {
+    console.log('Transcription not available:', error.message);
+    return null;
+  }
+}
 
 /**
  * Check if we recently sent an SMS to this phone number (cooldown)
@@ -422,6 +476,55 @@ router.post('/voice/voicemail-complete', validateTwilioWebhook, async (req, res)
     const twiml = new twilio.twiml.VoiceResponse();
     twiml.hangup();
     res.type('text/xml').send(twiml.toString());
+  }
+});
+
+// Twilio webhook - called when voicemail transcription is ready
+router.post('/voice/transcription-complete', validateTwilioWebhook, async (req, res) => {
+  try {
+    const { TranscriptionText, RecordingSid, RecordingUrl } = req.body;
+
+    console.log(`Transcription received for recording ${RecordingSid}`);
+
+    if (!TranscriptionText) {
+      return res.status(200).send('OK');
+    }
+
+    // Classify intent from transcription
+    const intent = classifyVoicemailIntent(TranscriptionText);
+
+    console.log(`Voicemail intent classified as: ${intent}`);
+
+    // Update the call record with transcription and intent
+    await query(
+      `UPDATE calls
+       SET voicemail_transcription = $1, voicemail_intent = $2
+       WHERE voicemail_url = $3 OR voicemail_url LIKE $4`,
+      [TranscriptionText, intent, RecordingUrl, `%${RecordingSid}%`]
+    );
+
+    // Update lead reason based on intent
+    const intentReasons = {
+      emergency: 'URGENT: Patient in pain/emergency',
+      appointment: 'Wants to book appointment',
+      callback: 'Requested callback',
+      inquiry: 'General inquiry',
+      other: 'Left voicemail'
+    };
+
+    await query(
+      `UPDATE leads
+       SET reason = $1, priority = $2
+       FROM calls c
+       WHERE leads.call_id = c.id
+         AND (c.voicemail_url = $3 OR c.voicemail_url LIKE $4)`,
+      [intentReasons[intent], intent === 'emergency' ? 'high' : 'medium', RecordingUrl, `%${RecordingSid}%`]
+    );
+
+    res.status(200).send('OK');
+  } catch (error) {
+    console.error('Transcription callback error:', error);
+    res.status(200).send('OK'); // Always return OK to Twilio
   }
 });
 
