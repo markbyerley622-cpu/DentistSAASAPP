@@ -238,26 +238,38 @@ function normalizePhoneNumber(phone) {
 /**
  * Parse inbound SMS webhook from CellCast
  *
- * CellCast sends inbound SMS to configured webhook URL with this format:
- * {
- *   "from": "+61412345678",
- *   "to": "+61481073412",
- *   "message": "Hello!",
- *   "timestamp": "2024-01-15T10:30:00Z",
- *   "message_id": "abc123"
- * }
+ * CellCast sends inbound SMS as an ARRAY:
+ * [
+ *   {
+ *     "from": "61412345678",
+ *     "body": "Hello!",
+ *     "received_at": "2026-01-08 17:50:34",
+ *     "message_id": "6952176713",
+ *     "type": "SMS",
+ *     "original_message_id": "...",
+ *     "original_body": "..."
+ *   }
+ * ]
  *
- * @param {object} webhookData - Raw webhook payload from CellCast
+ * @param {object|array} webhookData - Raw webhook payload from CellCast
  * @returns {object} - Normalized inbound message
  */
 function parseInboundWebhook(webhookData) {
-  // CellCast webhook format (may need adjustment based on actual API docs)
+  // CellCast sends an array - get first item
+  const data = Array.isArray(webhookData) ? webhookData[0] : webhookData;
+
+  if (!data) {
+    return { from: null, to: null, message: null, messageId: null, timestamp: null };
+  }
+
   return {
-    from: normalizePhoneNumber(webhookData.from || webhookData.sender || webhookData.mobile),
-    to: webhookData.to || webhookData.recipient || webhookData.dedicated_number,
-    message: webhookData.message || webhookData.sms_text || webhookData.body || webhookData.text,
-    messageId: webhookData.message_id || webhookData.id || webhookData.sms_id,
-    timestamp: webhookData.timestamp || webhookData.received_at || new Date().toISOString()
+    from: normalizePhoneNumber(data.from || data.sender || data.mobile),
+    to: data.to || data.recipient || data.dedicated_number || null, // CellCast doesn't include 'to'
+    message: data.body || data.message || data.sms_text || data.text,
+    messageId: data.message_id || data.id || data.sms_id,
+    timestamp: data.received_at || data.timestamp || new Date().toISOString(),
+    originalMessageId: data.original_message_id,
+    originalBody: data.original_body
   };
 }
 

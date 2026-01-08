@@ -46,30 +46,38 @@ router.use(webhookLimiter);
  */
 router.post('/incoming', async (req, res) => {
   try {
+    console.log('Inbound SMS webhook received:', JSON.stringify(req.body));
+
     // Parse the incoming message
     const parsed = cellcast.parseInboundWebhook(req.body);
     const { from: callerPhone, to: smsNumber, message: messageBody, messageId } = parsed;
 
     if (!callerPhone || !messageBody) {
-      console.log('Invalid inbound SMS webhook:', req.body);
+      console.log('Invalid inbound SMS webhook - missing from or body:', req.body);
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    console.log(`Inbound SMS from ${callerPhone} to ${smsNumber}: ${messageBody}`);
+    console.log(`Inbound SMS from ${callerPhone}: ${messageBody}`);
 
-    // Find user by SMS reply number
-    const settingsResult = await query(
-      `SELECT s.*, u.id as user_id, u.practice_name
-       FROM settings s
-       JOIN users u ON s.user_id = u.id
-       WHERE s.sms_reply_number = $1`,
-      [smsNumber]
-    );
+    const normalizedCaller = cellcast.normalizePhoneNumber(callerPhone);
+    let settings = null;
 
-    // Also try matching the global CellCast number
-    let settings = settingsResult.rows[0];
-    if (!settings && smsNumber === process.env.CELLCAST_PHONE_NUMBER) {
-      // Find by most recent conversation with this caller
+    // CellCast doesn't include 'to' field, so find user by:
+    // 1. Most recent active conversation with this caller
+    // 2. Or by SMS reply number if provided
+    if (smsNumber) {
+      const settingsResult = await query(
+        `SELECT s.*, u.id as user_id, u.practice_name
+         FROM settings s
+         JOIN users u ON s.user_id = u.id
+         WHERE s.sms_reply_number = $1`,
+        [smsNumber]
+      );
+      settings = settingsResult.rows[0];
+    }
+
+    // If no 'to' field or no match, find by most recent conversation
+    if (!settings) {
       const recentConv = await query(
         `SELECT s.*, u.id as user_id, u.practice_name
          FROM conversations c
@@ -77,31 +85,22 @@ router.post('/incoming', async (req, res) => {
          JOIN settings s ON s.user_id = u.id
          WHERE c.caller_phone = $1
            AND c.channel = 'sms'
-           AND c.status IN ('active', 'awaiting_response', 'awaiting_time_selection')
+           AND c.status IN ('active', 'awaiting_response', 'awaiting_time_selection', 'callback_requested')
          ORDER BY c.created_at DESC
          LIMIT 1`,
-        [cellcast.normalizePhoneNumber(callerPhone)]
+        [normalizedCaller]
       );
       settings = recentConv.rows[0];
     }
 
     if (!settings) {
-      console.log(`No user found for SMS number: ${smsNumber}`);
-      // Send a generic response
-      const apiKey = process.env.CELLCAST_API_KEY;
-      if (apiKey) {
-        await cellcast.sendSMS(
-          apiKey,
-          callerPhone,
-          'Sorry, we could not identify your practice. Please contact them directly.',
-          smsNumber
-        );
-      }
+      console.log(`No user/conversation found for caller: ${callerPhone}`);
       return res.json({ status: 'ok', action: 'no_user' });
     }
 
+    console.log(`Found user ${settings.user_id} (${settings.practice_name}) for caller ${callerPhone}`);
+
     // Find or create conversation for this phone number
-    const normalizedCaller = cellcast.normalizePhoneNumber(callerPhone);
     let conversationResult = await query(
       `SELECT * FROM conversations
        WHERE user_id = $1 AND caller_phone = $2 AND status IN ('active', 'awaiting_response', 'awaiting_time_selection', 'callback_requested')
