@@ -733,4 +733,95 @@ router.get('/health', (req, res) => {
   });
 });
 
+// =====================================================
+// TEST ENDPOINT (for testing without a PBX)
+// =====================================================
+
+const { authenticate } = require('../middleware/auth');
+
+/**
+ * Test missed call SMS - simulates a missed call to test the flow
+ *
+ * POST /api/pbx/test-missed-call
+ * Requires authentication
+ *
+ * Body:
+ * {
+ *   "testPhone": "+61412345678"  // Your phone number to receive the test SMS
+ * }
+ */
+router.post('/test-missed-call', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { testPhone } = req.body;
+
+    if (!testPhone) {
+      return res.status(400).json({ error: 'Test phone number is required' });
+    }
+
+    // Get user's settings
+    const settingsResult = await query(
+      `SELECT s.*, u.practice_name
+       FROM settings s
+       JOIN users u ON s.user_id = u.id
+       WHERE s.user_id = $1`,
+      [userId]
+    );
+
+    if (settingsResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Settings not found' });
+    }
+
+    const settings = settingsResult.rows[0];
+    settings.user_id = userId;
+
+    // Check if CellCast is configured
+    if (!settings.cellcast_api_key && !process.env.CELLCAST_API_KEY) {
+      return res.status(400).json({ error: 'CellCast API key not configured' });
+    }
+
+    if (!settings.sms_reply_number && !process.env.CELLCAST_PHONE_NUMBER) {
+      return res.status(400).json({ error: 'SMS reply number not configured' });
+    }
+
+    const normalizedCaller = cellcast.normalizePhoneNumber(testPhone);
+
+    // Create a test call record
+    const callResult = await query(
+      `INSERT INTO calls (user_id, caller_phone, status, is_missed, followup_status)
+       VALUES ($1, $2, 'no-answer', true, 'pending')
+       RETURNING id`,
+      [userId, normalizedCaller]
+    );
+
+    const callId = callResult.rows[0].id;
+
+    // Send the SMS
+    const smsResult = await sendMissedCallSMS(settings, normalizedCaller, callId);
+
+    if (smsResult.success) {
+      res.json({
+        success: true,
+        message: `Test SMS sent to ${testPhone}`,
+        callId: callId,
+        conversationId: smsResult.conversationId
+      });
+    } else {
+      // Mark call as failed
+      await query(
+        `UPDATE calls SET followup_status = 'failed' WHERE id = $1`,
+        [callId]
+      );
+
+      res.status(500).json({
+        success: false,
+        error: smsResult.error || 'Failed to send test SMS'
+      });
+    }
+  } catch (error) {
+    console.error('Test missed call error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 module.exports = router;

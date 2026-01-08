@@ -110,6 +110,8 @@ export default function Settings() {
 
   const [webhookUrls, setWebhookUrls] = useState(null)
   const [showWebhook, setShowWebhook] = useState(false)
+  const [testPhone, setTestPhone] = useState('')
+  const [testingSms, setTestingSms] = useState(false)
 
   const [savingBusinessHours, setSavingBusinessHours] = useState(false)
 
@@ -181,6 +183,37 @@ export default function Settings() {
     navigator.clipboard.writeText(text)
     setSuccess('Copied to clipboard!')
     setTimeout(() => setSuccess(''), 2000)
+  }
+
+  const handleTestSms = async () => {
+    if (!testPhone) {
+      setError('Please enter your phone number')
+      return
+    }
+
+    setTestingSms(true)
+    try {
+      const res = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/pbx/test-missed-call`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        },
+        body: JSON.stringify({ testPhone })
+      })
+
+      const data = await res.json()
+
+      if (res.ok && data.success) {
+        setSuccess(`Test SMS sent to ${testPhone}! Check your phone and reply to test the booking flow.`)
+      } else {
+        setError(data.error || 'Failed to send test SMS')
+      }
+    } catch (err) {
+      setError('Failed to send test SMS. Check your connection.')
+    } finally {
+      setTestingSms(false)
+    }
   }
 
   const handleSaveProfile = async () => {
@@ -454,6 +487,30 @@ export default function Settings() {
             {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
             <span className="ml-2">Save Phone Settings</span>
           </button>
+
+          {/* Test SMS Section */}
+          <div className="pt-4 border-t border-dark-700/50">
+            <p className="text-sm font-medium text-dark-200 mb-3">Test SMS Flow</p>
+            <div className="flex gap-2">
+              <input
+                type="tel"
+                value={testPhone}
+                onChange={(e) => setTestPhone(e.target.value)}
+                placeholder="Your phone number (+61...)"
+                className="input flex-1"
+              />
+              <button
+                onClick={handleTestSms}
+                disabled={testingSms || !testPhone}
+                className="btn-secondary whitespace-nowrap"
+              >
+                {testingSms ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Send Test SMS'}
+              </button>
+            </div>
+            <p className="text-xs text-dark-500 mt-2">
+              This simulates a missed call and sends you the follow-up SMS. Reply to test the booking flow!
+            </p>
+          </div>
 
           {/* Webhook Configuration */}
           <div className="pt-4 border-t border-dark-700/50">
