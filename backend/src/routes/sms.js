@@ -769,9 +769,10 @@ async function handleConversation(conversationId, incomingMessage, settings) {
            SET status = 'converted',
                appointment_booked = true,
                appointment_time = $1,
-               reason = $2
-           WHERE conversation_id = $3`,
-          [formattedTime, intent === 'callback' ? 'Callback scheduled' : 'Appointment scheduled', conversationId]
+               preferred_time = $2,
+               reason = $3
+           WHERE conversation_id = $4`,
+          [selectedTime.toISOString(), formattedTime, intent === 'callback' ? 'Callback scheduled' : 'Appointment scheduled', conversationId]
         );
 
         await client.query(
