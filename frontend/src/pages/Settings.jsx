@@ -13,10 +13,7 @@ import {
   X,
   AlertCircle,
   Save,
-  Loader2,
-  Copy,
-  Link,
-  RefreshCw
+  Loader2
 } from 'lucide-react'
 
 function SettingsSection({ title, description, icon: Icon, children }) {
@@ -94,13 +91,8 @@ export default function Settings() {
   })
 
   const [settings, setSettings] = useState({
-    twilioPhone: '',
     forwardingPhone: '',
-    businessPhone: '',
-    pbxType: 'other',
     smsReplyNumber: '',
-    webhookUrl: '',
-    hasPbxWebhookSecret: false,
     notificationEmail: true,
     notificationSms: false,
     bookingMode: 'manual',
@@ -108,8 +100,6 @@ export default function Settings() {
     businessHours: {}
   })
 
-  const [webhookUrls, setWebhookUrls] = useState(null)
-  const [showWebhook, setShowWebhook] = useState(false)
   const [testPhone, setTestPhone] = useState('')
   const [testingSms, setTestingSms] = useState(false)
 
@@ -134,13 +124,8 @@ export default function Settings() {
         const s = settingsRes.data.settings
 
         setSettings({
-          twilioPhone: s.twilioPhone || '',
           forwardingPhone: s.forwardingPhone || '',
-          businessPhone: s.businessPhone || '',
-          pbxType: s.pbxType || 'other',
           smsReplyNumber: s.smsReplyNumber || '',
-          webhookUrl: s.webhookUrl || '',
-          hasPbxWebhookSecret: s.hasPbxWebhookSecret || false,
           notificationEmail: s.notificationEmail,
           notificationSms: s.notificationSms,
           bookingMode: s.bookingMode,
@@ -167,23 +152,6 @@ export default function Settings() {
 
     fetchData()
   }, [user])
-
-  const fetchWebhookUrls = async () => {
-    try {
-      const res = await settingsAPI.getWebhookUrls()
-      setWebhookUrls(res.data)
-      setShowWebhook(true)
-    } catch (error) {
-      console.error('Failed to fetch webhook URLs:', error)
-      setError('Failed to load webhook configuration')
-    }
-  }
-
-  const copyToClipboard = (text) => {
-    navigator.clipboard.writeText(text)
-    setSuccess('Copied to clipboard!')
-    setTimeout(() => setSuccess(''), 2000)
-  }
 
   const handleTestSms = async () => {
     if (!testPhone) {
@@ -259,29 +227,6 @@ export default function Settings() {
       setSuccess('Phone number saved!')
     } catch (err) {
       setError(err.response?.data?.error?.message || 'Failed to save phone number')
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  const handleSavePbxSettings = async () => {
-    setSaving(true)
-    try {
-      await settingsAPI.updatePbx({
-        businessPhone: settings.businessPhone,
-        pbxType: settings.pbxType,
-        forwardingPhone: settings.forwardingPhone
-      })
-      // Refresh settings to get updated webhook URL
-      const settingsRes = await settingsAPI.get()
-      setSettings(prev => ({
-        ...prev,
-        webhookUrl: settingsRes.data.settings.webhookUrl,
-        hasPbxWebhookSecret: settingsRes.data.settings.hasPbxWebhookSecret
-      }))
-      setSuccess('Phone system settings saved!')
-    } catch (err) {
-      setError(err.response?.data?.error?.message || 'Failed to save phone system settings')
     } finally {
       setSaving(false)
     }
@@ -413,53 +358,38 @@ export default function Settings() {
 
       {/* Phone System Configuration */}
       <SettingsSection
-        title="Phone System"
-        description="Configure your phone system for automatic SMS follow-ups on missed calls"
+        title="SMS Follow-Up"
+        description="Automatic SMS follow-ups when patients miss your call"
         icon={Phone}
       >
         <div className="space-y-4">
+          {/* SMS Reply Number - shows configured or pending */}
+          {settings.smsReplyNumber ? (
+            <div className="p-4 rounded-lg bg-success-500/10 border border-success-500/20">
+              <p className="text-xs text-success-400 mb-1">Your SMS Number</p>
+              <p className="text-2xl font-bold text-dark-100 tracking-wide">{settings.smsReplyNumber}</p>
+              <p className="text-xs text-dark-400 mt-2">
+                Patients receive SMS from this number and reply here to book appointments
+              </p>
+            </div>
+          ) : (
+            <div className="p-4 rounded-lg bg-warning-500/10 border border-warning-500/20">
+              <p className="text-sm font-medium text-warning-400 mb-1">Configuring Soon</p>
+              <p className="text-xs text-warning-300">
+                Your dedicated SMS number is being set up. You'll be notified when it's ready.
+              </p>
+            </div>
+          )}
+
           {/* Info banner */}
-          <div className="p-4 rounded-lg bg-accent-500/10 border border-accent-500/20">
-            <p className="text-sm text-accent-300">
-              When patients call your business number and you miss the call (and they don't leave a voicemail), they'll automatically receive an SMS to book an appointment.
+          <div className="p-3 rounded-lg bg-dark-800/50 border border-dark-700/50">
+            <p className="text-sm text-dark-300">
+              When patients call and you miss it (and they don't leave a voicemail), they'll automatically receive an SMS to book an appointment.
             </p>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="input-group">
-              <label className="input-label">Business Phone Number</label>
-              <input
-                type="tel"
-                value={settings.businessPhone || ''}
-                onChange={(e) => setSettings({ ...settings, businessPhone: e.target.value })}
-                className="input"
-                placeholder="+61298765432"
-              />
-              <p className="text-xs text-dark-500 mt-1">
-                Your main practice number that patients call
-              </p>
-            </div>
-
-            <div className="input-group">
-              <label className="input-label">Phone System Type</label>
-              <select
-                value={settings.pbxType || 'other'}
-                onChange={(e) => setSettings({ ...settings, pbxType: e.target.value })}
-                className="input"
-              >
-                <option value="other">Other / Generic</option>
-                <option value="3cx">3CX</option>
-                <option value="ringcentral">RingCentral</option>
-                <option value="vonage">Vonage</option>
-                <option value="freepbx">FreePBX / Asterisk</option>
-                <option value="8x8">8x8</option>
-                <option value="zoom">Zoom Phone</option>
-              </select>
-            </div>
-          </div>
-
           <div className="input-group">
-            <label className="input-label">Call Forwarding Number (Optional)</label>
+            <label className="input-label">Call Forwarding Number</label>
             <input
               type="tel"
               value={settings.forwardingPhone || ''}
@@ -468,107 +398,40 @@ export default function Settings() {
               placeholder="+61414855294"
             />
             <p className="text-xs text-dark-500 mt-1">
-              Your mobile or alternate number where calls should ring
+              Your mobile or office phone where calls should ring
             </p>
           </div>
 
-          {/* SMS Reply Number */}
+          <button onClick={handleSaveForwarding} disabled={saving} className="btn-primary">
+            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+            <span className="ml-2">Save</span>
+          </button>
+
+          {/* Test SMS Section - only show when configured */}
           {settings.smsReplyNumber && (
-            <div className="p-3 rounded-lg bg-dark-800/50 border border-dark-700/50">
-              <p className="text-xs text-dark-400 mb-1">SMS Reply Number</p>
-              <p className="text-lg font-semibold text-dark-100">{settings.smsReplyNumber}</p>
-              <p className="text-xs text-dark-500 mt-1">
-                This is the number patients will receive SMS from and reply to
+            <div className="pt-4 border-t border-dark-700/50">
+              <p className="text-sm font-medium text-dark-200 mb-3">Test SMS Flow</p>
+              <div className="flex gap-2">
+                <input
+                  type="tel"
+                  value={testPhone}
+                  onChange={(e) => setTestPhone(e.target.value)}
+                  placeholder="Your phone number (+61...)"
+                  className="input flex-1"
+                />
+                <button
+                  onClick={handleTestSms}
+                  disabled={testingSms || !testPhone}
+                  className="btn-secondary whitespace-nowrap"
+                >
+                  {testingSms ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Send Test SMS'}
+                </button>
+              </div>
+              <p className="text-xs text-dark-500 mt-2">
+                Simulates a missed call and sends you the SMS. Reply to test booking!
               </p>
             </div>
           )}
-
-          <button onClick={handleSavePbxSettings} disabled={saving} className="btn-primary">
-            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-            <span className="ml-2">Save Phone Settings</span>
-          </button>
-
-          {/* Test SMS Section */}
-          <div className="pt-4 border-t border-dark-700/50">
-            <p className="text-sm font-medium text-dark-200 mb-3">Test SMS Flow</p>
-            <div className="flex gap-2">
-              <input
-                type="tel"
-                value={testPhone}
-                onChange={(e) => setTestPhone(e.target.value)}
-                placeholder="Your phone number (+61...)"
-                className="input flex-1"
-              />
-              <button
-                onClick={handleTestSms}
-                disabled={testingSms || !testPhone}
-                className="btn-secondary whitespace-nowrap"
-              >
-                {testingSms ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Send Test SMS'}
-              </button>
-            </div>
-            <p className="text-xs text-dark-500 mt-2">
-              This simulates a missed call and sends you the follow-up SMS. Reply to test the booking flow!
-            </p>
-          </div>
-
-          {/* Webhook Configuration */}
-          <div className="pt-4 border-t border-dark-700/50">
-            <button
-              onClick={fetchWebhookUrls}
-              className="text-sm text-accent-400 hover:text-accent-300 flex items-center gap-2"
-            >
-              <Link className="w-4 h-4" />
-              <span>View Webhook Configuration</span>
-            </button>
-
-            {showWebhook && webhookUrls && (
-              <div className="mt-4 p-4 rounded-lg bg-dark-800/50 border border-dark-700/50 space-y-3">
-                <p className="text-sm font-medium text-dark-200">Webhook URLs for your phone system:</p>
-
-                <div className="space-y-2">
-                  <div>
-                    <p className="text-xs text-dark-400">Missed Call Webhook</p>
-                    <div className="flex items-center gap-2">
-                      <code className="flex-1 text-xs text-accent-400 bg-dark-900/50 px-2 py-1 rounded overflow-x-auto">
-                        {webhookUrls.webhooks?.missedCall}
-                      </code>
-                      <button
-                        onClick={() => copyToClipboard(webhookUrls.webhooks?.missedCall)}
-                        className="text-dark-400 hover:text-dark-200"
-                      >
-                        <Copy className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </div>
-
-                  <div>
-                    <p className="text-xs text-dark-400">Webhook Secret</p>
-                    <div className="flex items-center gap-2">
-                      <code className="flex-1 text-xs text-accent-400 bg-dark-900/50 px-2 py-1 rounded overflow-x-auto">
-                        {webhookUrls.webhookSecret || 'Not generated'}
-                      </code>
-                      <button
-                        onClick={() => copyToClipboard(webhookUrls.webhookSecret)}
-                        className="text-dark-400 hover:text-dark-200"
-                      >
-                        <Copy className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="text-xs text-dark-500 space-y-1 pt-2">
-                  <p>Configure your phone system to send a POST request to the webhook URL when:</p>
-                  <ul className="list-disc list-inside ml-2">
-                    <li>A call is missed (not answered)</li>
-                    <li>The caller did NOT leave a voicemail</li>
-                  </ul>
-                  <p className="mt-2">Include header: <code className="text-accent-400">X-Webhook-Secret: [your secret]</code></p>
-                </div>
-              </div>
-            )}
-          </div>
         </div>
       </SettingsSection>
 

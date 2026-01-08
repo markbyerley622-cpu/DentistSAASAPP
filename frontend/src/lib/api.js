@@ -158,24 +158,11 @@ export const analyticsAPI = {
 export const settingsAPI = {
   get: () => api.get('/settings'),
   update: (data) => api.put('/settings', data),
-  updateTwilio: (data) => api.put('/settings/twilio', data),
   updateForwarding: (data) => api.put('/settings/forwarding', data),
   updateNotifications: (data) => api.put('/settings/notifications', data),
   updateBusinessHours: (data) => api.put('/settings/business-hours', data),
   updateAiGreeting: (data) => api.put('/settings/ai-greeting', data),
-  // PBX settings
-  updatePbx: (data) => api.put('/settings/pbx', data),
-  // SMS settings (CellCast)
-  updateSms: (data) => api.put('/settings/sms', data),
   testSms: (data) => api.post('/settings/sms/test', data),
-  // Webhook URLs
-  getWebhookUrls: () => api.get('/settings/webhook-urls'),
-  regenerateWebhookSecret: () => api.post('/settings/regenerate-webhook-secret'),
-}
-
-// Twilio API (legacy - to be removed)
-export const twilioAPI = {
-  test: () => api.post('/twilio/test'),
 }
 
 // Booking Slots API
