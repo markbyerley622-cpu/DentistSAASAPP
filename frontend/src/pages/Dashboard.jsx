@@ -13,12 +13,7 @@ import {
   PhoneMissed,
   CalendarCheck,
   PhoneOff,
-  Zap,
-  Voicemail,
-  AlertTriangle,
-  PhoneCall,
-  HelpCircle,
-  Play
+  Zap
 } from 'lucide-react'
 
 function StatCard({ title, value, suffix, trend, trendDirection, icon: Icon, gradient, delay }) {
@@ -150,92 +145,24 @@ function LeadCard({ lead }) {
   )
 }
 
-function VoicemailCard({ voicemail }) {
-  const getIntentBadge = (intent) => {
-    const styles = {
-      emergency: { bg: 'bg-danger-500/10 text-danger-400 border-danger-500/20', icon: AlertTriangle, label: 'Emergency' },
-      appointment: { bg: 'bg-success-500/10 text-success-400 border-success-500/20', icon: CalendarCheck, label: 'Appointment' },
-      callback: { bg: 'bg-accent-500/10 text-accent-400 border-accent-500/20', icon: PhoneCall, label: 'Callback' },
-      inquiry: { bg: 'bg-purple-500/10 text-purple-400 border-purple-500/20', icon: HelpCircle, label: 'Inquiry' },
-      other: { bg: 'bg-dark-600/50 text-dark-400 border-dark-600/50', icon: Voicemail, label: 'Other' }
-    }
-    return styles[intent] || styles.other
-  }
-
-  const formatDuration = (seconds) => {
-    if (!seconds) return '0:00'
-    const mins = Math.floor(seconds / 60)
-    const secs = seconds % 60
-    return `${mins}:${secs.toString().padStart(2, '0')}`
-  }
-
-  const formatTime = (dateString) => {
-    return new Date(dateString).toLocaleTimeString('en-US', {
-      hour: 'numeric',
-      minute: '2-digit',
-      hour12: true
-    })
-  }
-
-  const intentInfo = getIntentBadge(voicemail.intent)
-  const IntentIcon = intentInfo.icon
-
-  return (
-    <div className={`p-4 rounded-lg bg-dark-800/30 hover:bg-dark-800/50 transition-colors group ${voicemail.intent === 'emergency' ? 'border border-danger-500/30' : ''}`}>
-      <div className="flex items-start gap-3">
-        <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${voicemail.intent === 'emergency' ? 'bg-danger-500/20' : 'bg-dark-700'}`}>
-          <IntentIcon className={`w-5 h-5 ${voicemail.intent === 'emergency' ? 'text-danger-400' : 'text-dark-400'}`} />
-        </div>
-
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-1">
-            <p className="text-sm font-medium text-dark-200">{voicemail.callerName}</p>
-            <span className={`px-2 py-0.5 rounded-full text-xs font-medium border ${intentInfo.bg}`}>
-              {intentInfo.label}
-            </span>
-          </div>
-          <p className="text-xs text-dark-500 mb-2">{voicemail.callerPhone}</p>
-
-          {voicemail.transcription && (
-            <p className="text-xs text-dark-400 italic line-clamp-2">
-              "{voicemail.transcription}"
-            </p>
-          )}
-        </div>
-
-        <div className="text-right flex flex-col items-end gap-2">
-          <p className="text-xs text-dark-500">{formatTime(voicemail.createdAt)}</p>
-          <div className="flex items-center gap-1 text-xs text-dark-400">
-            <Play className="w-3 h-3" />
-            <span>{formatDuration(voicemail.duration)}</span>
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
 export default function Dashboard() {
   const [stats, setStats] = useState(null)
   const [recentCalls, setRecentCalls] = useState([])
   const [recentLeads, setRecentLeads] = useState([])
-  const [voicemails, setVoicemails] = useState([])
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const [analyticsRes, callsRes, leadsRes, voicemailsRes] = await Promise.all([
+        const [analyticsRes, callsRes, leadsRes] = await Promise.all([
           analyticsAPI.getOverview('30d'),
           callsAPI.getAll({ limit: 5 }),
-          leadsAPI.getAll({ limit: 5 }),
-          callsAPI.getVoicemails({ limit: 5 })
+          leadsAPI.getAll({ limit: 5 })
         ])
 
         setStats(analyticsRes.data.stats)
         setRecentCalls(callsRes.data.calls)
         setRecentLeads(leadsRes.data.leads)
-        setVoicemails(voicemailsRes.data.voicemails || [])
       } catch (error) {
         console.error('Failed to fetch dashboard data:', error)
       } finally {
@@ -335,42 +262,6 @@ export default function Dashboard() {
             </span>
           </Link>
         ))}
-      </div>
-
-      {/* Voicemails with Intent */}
-      <div className="card">
-        <div className="flex items-center justify-between mb-6">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-warning-500/10 flex items-center justify-center">
-              <Voicemail className="w-5 h-5 text-warning-400" />
-            </div>
-            <div>
-              <h3 className="font-semibold text-dark-100">Voicemails</h3>
-              <p className="text-xs text-dark-500">Sorted by urgency - emergency first</p>
-            </div>
-          </div>
-          <Link
-            to="/missed-patients"
-            className="text-sm text-accent-400 hover:text-accent-300 font-medium flex items-center gap-1"
-          >
-            View all
-            <ArrowUpRight className="w-4 h-4" />
-          </Link>
-        </div>
-
-        <div className="space-y-3">
-          {voicemails.length > 0 ? (
-            voicemails.map((vm) => (
-              <VoicemailCard key={vm.id} voicemail={vm} />
-            ))
-          ) : (
-            <div className="text-center py-8">
-              <Voicemail className="w-8 h-8 text-dark-600 mx-auto mb-3" />
-              <p className="text-dark-400 text-sm">No voicemails yet</p>
-              <p className="text-dark-500 text-xs mt-1">When callers leave voicemails, they'll appear here with transcription and intent</p>
-            </div>
-          )}
-        </div>
       </div>
 
       {/* Recent activity */}

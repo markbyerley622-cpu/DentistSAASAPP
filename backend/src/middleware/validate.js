@@ -273,7 +273,7 @@ const createLeadSchema = Joi.object({
     .max(500)
     .optional(),
   source: Joi.string()
-    .valid('manual', 'missed_call', 'voicemail', 'sms', 'web', 'referral')
+    .valid('manual', 'missed_call', 'sms', 'web', 'referral')
     .optional(),
   priority: Joi.string()
     .valid('low', 'medium', 'high')

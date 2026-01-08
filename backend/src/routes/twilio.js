@@ -183,6 +183,7 @@ router.post('/voice/incoming', validateTwilioWebhook, async (req, res) => {
 });
 
 // Twilio webhook - called after the dial attempt completes
+// Offers voicemail option - SMS only sent if caller doesn't leave a voicemail
 router.post('/voice/dial-status', validateTwilioWebhook, async (req, res) => {
   try {
     const { DialCallStatus, CallSid } = req.body;
@@ -191,47 +192,46 @@ router.post('/voice/dial-status', validateTwilioWebhook, async (req, res) => {
 
     console.log(`Dial status: ${DialCallStatus} for call from ${originalFrom}`);
 
-    // If the call was NOT answered (missed), offer voicemail
-    if (['no-answer', 'busy', 'failed', 'canceled'].includes(DialCallStatus)) {
-      // Find user by Twilio phone number to get practice name
-      const settingsResult = await query(
-        `SELECT s.*, u.id as user_id, u.practice_name
-         FROM settings s
-         JOIN users u ON s.user_id = u.id
-         WHERE s.twilio_phone = $1`,
-        [twilioNumber]
-      );
-
-      const practiceName = settingsResult.rows.length > 0
-        ? settingsResult.rows[0].practice_name || 'our practice'
-        : 'our practice';
-
-      // Offer voicemail option - if they leave one, no SMS; if they hang up, send SMS
+    // Call was answered - just hang up gracefully
+    if (!['no-answer', 'busy', 'failed', 'canceled'].includes(DialCallStatus)) {
       const twiml = new twilio.twiml.VoiceResponse();
-      twiml.say({ voice: 'alice' }, `Sorry we missed your call at ${practiceName}. Please leave a message after the beep, or simply hang up and we'll text you shortly.`);
-
-      // Record voicemail with callback to check if they actually left one
-      // Enable transcription to classify caller intent
-      twiml.record({
-        action: `/api/twilio/voice/voicemail-complete?originalFrom=${encodeURIComponent(originalFrom)}&twilioNumber=${encodeURIComponent(twilioNumber)}&callSid=${encodeURIComponent(CallSid)}`,
-        method: 'POST',
-        maxLength: 120, // 2 minutes max
-        timeout: 5, // 5 seconds of silence = done
-        transcribe: true, // Enable transcription for intent classification
-        transcribeCallback: `/api/twilio/voice/transcription-complete`,
-        playBeep: true
-      });
-
-      // If they hang up before/during recording, this won't execute (Twilio calls the action URL)
       return res.type('text/xml').send(twiml.toString());
     }
 
-    // Call was answered - just hang up gracefully
+    // MISSED CALL - Offer voicemail option
+    // If they leave a voicemail, no SMS is sent (dentist handles via phone system)
+    // If they hang up without leaving voicemail, SMS is sent
+    const settingsResult = await query(
+      `SELECT s.*, u.id as user_id, u.practice_name
+       FROM settings s
+       JOIN users u ON s.user_id = u.id
+       WHERE s.twilio_phone = $1`,
+      [twilioNumber]
+    );
+
+    const practiceName = settingsResult.rows.length > 0
+      ? settingsResult.rows[0].practice_name || 'our practice'
+      : 'our practice';
+
+    // Offer voicemail on PBX - the callback will check if they actually left one
     const twiml = new twilio.twiml.VoiceResponse();
-    res.type('text/xml').send(twiml.toString());
+    twiml.say({ voice: 'alice' }, `Thank you for calling ${practiceName}. We're sorry we can't take your call right now. Please leave a message after the beep and we'll get back to you as soon as possible.`);
+
+    // Record voicemail - callback determines if SMS should be sent
+    twiml.record({
+      action: `/api/twilio/voice/recording-complete?originalFrom=${encodeURIComponent(originalFrom)}&twilioNumber=${encodeURIComponent(twilioNumber)}&callSid=${encodeURIComponent(CallSid)}`,
+      method: 'POST',
+      maxLength: 120,
+      timeout: 5,
+      playBeep: true
+    });
+
+    return res.type('text/xml').send(twiml.toString());
+
   } catch (error) {
     console.error('Dial status error:', error);
     const twiml = new twilio.twiml.VoiceResponse();
+    twiml.hangup();
     res.type('text/xml').send(twiml.toString());
   }
 });
@@ -239,85 +239,18 @@ router.post('/voice/dial-status', validateTwilioWebhook, async (req, res) => {
 // SMS cooldown in minutes - don't spam the same caller
 const SMS_COOLDOWN_MINUTES = 30;
 
-/**
- * Classify voicemail intent from transcription using keyword rules
- * No AI - pure deterministic matching
- */
-function classifyVoicemailIntent(transcription) {
-  if (!transcription) return 'other';
-  const text = transcription.toLowerCase();
-
-  // Emergency keywords - highest priority
-  if (/emergency|pain|hurt|aching|urgent|bleeding|broken|cracked|swollen|abscess|infection/.test(text)) {
-    return 'emergency';
-  }
-
-  // Appointment/booking keywords
-  if (/appointment|book|schedule|available|slot|come in|visit|check.?up|cleaning|exam/.test(text)) {
-    return 'appointment';
-  }
-
-  // Callback request keywords
-  if (/call.*back|return.*call|callback|ring.*back|get back to|reach me|contact me/.test(text)) {
-    return 'callback';
-  }
-
-  // General inquiry keywords
-  if (/question|wondering|information|how much|cost|price|insurance|hours|open|location/.test(text)) {
-    return 'inquiry';
-  }
-
-  return 'other';
-}
-
-/**
- * Get transcription from Twilio recording
- * Uses Twilio's built-in transcription or returns null
- */
-async function getVoicemailTranscription(client, recordingSid) {
+// Twilio webhook - called after recording completes (or caller hangs up)
+// Determines whether to send SMS based on if voicemail was left
+router.post('/voice/recording-complete', validateTwilioWebhook, async (req, res) => {
   try {
-    // Twilio can provide transcription if enabled
-    const transcription = await client.recordings(recordingSid)
-      .transcriptions
-      .list({ limit: 1 });
-
-    if (transcription.length > 0) {
-      return transcription[0].transcriptionText;
-    }
-    return null;
-  } catch (error) {
-    console.log('Transcription not available:', error.message);
-    return null;
-  }
-}
-
-/**
- * Check if we recently sent an SMS to this phone number (cooldown)
- */
-async function canSendSMS(userId, callerPhone) {
-  const result = await query(
-    `SELECT id FROM conversations
-     WHERE user_id = $1
-       AND caller_phone = $2
-       AND channel = 'sms'
-       AND created_at > NOW() - INTERVAL '1 minute' * $3
-     LIMIT 1`,
-    [userId, callerPhone, SMS_COOLDOWN_MINUTES]
-  );
-  return result.rows.length === 0; // Can send if no recent conversation
-}
-
-// Twilio webhook - called after voicemail recording completes (or caller hangs up)
-router.post('/voice/voicemail-complete', validateTwilioWebhook, async (req, res) => {
-  try {
-    const { RecordingUrl, RecordingDuration, RecordingSid } = req.body;
+    const { RecordingDuration } = req.body;
     const originalFrom = req.query.originalFrom;
     const twilioNumber = req.query.twilioNumber;
     const callSid = req.query.callSid;
 
     const recordingDuration = parseInt(RecordingDuration) || 0;
 
-    console.log(`Voicemail complete from ${originalFrom}, duration: ${recordingDuration}s`);
+    console.log(`Recording complete from ${originalFrom}, duration: ${recordingDuration}s`);
 
     // Find user by Twilio phone number
     const settingsResult = await query(
@@ -335,55 +268,49 @@ router.post('/voice/voicemail-complete', validateTwilioWebhook, async (req, res)
     }
 
     const settings = settingsResult.rows[0];
-
-    // Create missed call record
-    const callResult = await query(
-      `INSERT INTO calls (user_id, twilio_call_sid, caller_phone, status, is_missed, followup_status, voicemail_url, voicemail_duration)
-       VALUES ($1, $2, $3, 'no-answer', true, $4, $5, $6)
-       RETURNING id`,
-      [
-        settings.user_id,
-        callSid,
-        originalFrom,
-        recordingDuration >= 3 ? 'voicemail_left' : 'pending',
-        RecordingUrl || null,
-        recordingDuration
-      ]
-    );
-
-    const callId = callResult.rows[0].id;
+    const practiceName = settings.practice_name || 'our practice';
 
     // ===========================================
-    // DETERMINISTIC SMS LOGIC:
-    // 1. Voicemail left (3+ seconds) = NO SMS
-    // 2. No voicemail + cooldown active = NO SMS
-    // 3. No voicemail + no cooldown = SEND SMS
+    // VOICEMAIL DETECTION LOGIC:
+    // Recording >= 3 seconds = Voicemail left = NO SMS
+    // Recording < 3 seconds = No voicemail = SEND SMS
     // ===========================================
 
     if (recordingDuration >= 3) {
-      // VOICEMAIL LEFT - Don't send SMS, dentist will listen and call back
-      console.log(`Voicemail left (${recordingDuration}s), NOT sending SMS`);
+      // VOICEMAIL LEFT - Don't send SMS, dentist handles via phone system
+      console.log(`Voicemail left (${recordingDuration}s), NOT sending SMS - dentist will handle`);
 
-      // Create lead for the voicemail so it shows in dashboard
+      // Create missed call record (no voicemail data stored in app)
       await query(
-        `INSERT INTO leads (user_id, call_id, name, phone, status, source, reason)
-         VALUES ($1, $2, 'Unknown Caller', $3, 'new', 'voicemail', 'Left voicemail')`,
-        [settings.user_id, callId, originalFrom]
+        `INSERT INTO calls (user_id, twilio_call_sid, caller_phone, status, is_missed, followup_status)
+         VALUES ($1, $2, $3, 'no-answer', true, 'completed')`,
+        [settings.user_id, callSid, originalFrom]
       );
 
       const twiml = new twilio.twiml.VoiceResponse();
-      twiml.say({ voice: 'alice' }, 'Thank you for your message. We will get back to you soon. Goodbye!');
+      twiml.say({ voice: 'alice' }, 'Thank you for your message. We will get back to you as soon as possible. Goodbye.');
       twiml.hangup();
       return res.type('text/xml').send(twiml.toString());
     }
 
-    // NO VOICEMAIL - Check cooldown before sending SMS
+    // NO VOICEMAIL LEFT - Caller hung up without leaving message, send SMS follow-up
+    console.log(`No voicemail left, sending SMS follow-up to ${originalFrom}`);
+
+    // Create missed call record
+    const callResult = await query(
+      `INSERT INTO calls (user_id, twilio_call_sid, caller_phone, status, is_missed, followup_status)
+       VALUES ($1, $2, $3, 'no-answer', true, 'pending')
+       RETURNING id`,
+      [settings.user_id, callSid, originalFrom]
+    );
+
+    const callId = callResult.rows[0].id;
+
+    // Check SMS cooldown
     const canSend = await canSendSMS(settings.user_id, originalFrom);
 
     if (!canSend) {
       console.log(`SMS cooldown active for ${originalFrom}, NOT sending duplicate SMS`);
-
-      // Update call to note we skipped SMS due to cooldown
       await query(
         `UPDATE calls SET followup_status = 'cooldown_skipped' WHERE id = $1`,
         [callId]
@@ -395,14 +322,11 @@ router.post('/voice/voicemail-complete', validateTwilioWebhook, async (req, res)
       return res.type('text/xml').send(twiml.toString());
     }
 
-    // NO VOICEMAIL + NO COOLDOWN = Send SMS
-    console.log(`No voicemail, no cooldown - sending SMS follow-up to ${originalFrom}`);
-
+    // SEND SMS
     if (settings.twilio_account_sid && settings.twilio_auth_token) {
       const decryptedToken = decrypt(settings.twilio_auth_token);
       const client = twilio(settings.twilio_account_sid, decryptedToken);
 
-      const practiceName = settings.practice_name || 'our practice';
       const followUpMessage = settings.ai_greeting ||
         `Hi! This is ${practiceName}. We missed your call and want to make sure we help you. Reply 1 for us to call you back, or Reply 2 to schedule an appointment. Thanks!`;
 
@@ -450,68 +374,35 @@ router.post('/voice/voicemail-complete', validateTwilioWebhook, async (req, res)
       }
     }
 
-    // SMS sent successfully - tell them and hang up
+    // SMS sent - brief goodbye (caller will receive SMS shortly)
     const twiml = new twilio.twiml.VoiceResponse();
-    twiml.say({ voice: 'alice' }, 'We will text you shortly. Goodbye!');
+    twiml.say({ voice: 'alice' }, 'Thank you for calling. Goodbye.');
     twiml.hangup();
     res.type('text/xml').send(twiml.toString());
 
   } catch (error) {
-    console.error('Voicemail complete error:', error);
+    console.error('Recording complete error:', error);
     const twiml = new twilio.twiml.VoiceResponse();
     twiml.hangup();
     res.type('text/xml').send(twiml.toString());
   }
 });
 
-// Twilio webhook - called when voicemail transcription is ready
-router.post('/voice/transcription-complete', validateTwilioWebhook, async (req, res) => {
-  try {
-    const { TranscriptionText, RecordingSid, RecordingUrl } = req.body;
-
-    console.log(`Transcription received for recording ${RecordingSid}`);
-
-    if (!TranscriptionText) {
-      return res.status(200).send('OK');
-    }
-
-    // Classify intent from transcription
-    const intent = classifyVoicemailIntent(TranscriptionText);
-
-    console.log(`Voicemail intent classified as: ${intent}`);
-
-    // Update the call record with transcription and intent
-    await query(
-      `UPDATE calls
-       SET voicemail_transcription = $1, voicemail_intent = $2
-       WHERE voicemail_url = $3 OR voicemail_url LIKE $4`,
-      [TranscriptionText, intent, RecordingUrl, `%${RecordingSid}%`]
-    );
-
-    // Update lead reason based on intent
-    const intentReasons = {
-      emergency: 'URGENT: Patient in pain/emergency',
-      appointment: 'Wants to book appointment',
-      callback: 'Requested callback',
-      inquiry: 'General inquiry',
-      other: 'Left voicemail'
-    };
-
-    await query(
-      `UPDATE leads
-       SET reason = $1, priority = $2
-       FROM calls c
-       WHERE leads.call_id = c.id
-         AND (c.voicemail_url = $3 OR c.voicemail_url LIKE $4)`,
-      [intentReasons[intent], intent === 'emergency' ? 'high' : 'medium', RecordingUrl, `%${RecordingSid}%`]
-    );
-
-    res.status(200).send('OK');
-  } catch (error) {
-    console.error('Transcription callback error:', error);
-    res.status(200).send('OK'); // Always return OK to Twilio
-  }
-});
+/**
+ * Check if we recently sent an SMS to this phone number (cooldown)
+ */
+async function canSendSMS(userId, callerPhone) {
+  const result = await query(
+    `SELECT id FROM conversations
+     WHERE user_id = $1
+       AND caller_phone = $2
+       AND channel = 'sms'
+       AND created_at > NOW() - INTERVAL '1 minute' * $3
+     LIMIT 1`,
+    [userId, callerPhone, SMS_COOLDOWN_MINUTES]
+  );
+  return result.rows.length === 0; // Can send if no recent conversation
+}
 
 // Twilio webhook - handles incoming SMS messages
 router.post('/sms/incoming', validateTwilioWebhook, async (req, res) => {

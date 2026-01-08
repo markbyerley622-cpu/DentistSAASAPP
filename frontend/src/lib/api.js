@@ -133,7 +133,6 @@ export const callsAPI = {
   getOne: (id) => api.get(`/calls/${id}`),
   update: (id, data) => api.put(`/calls/${id}`, data),
   delete: (id) => api.delete(`/calls/${id}`),
-  getVoicemails: (params) => api.get('/calls/voicemails', { params }),
 }
 
 // Leads API
@@ -207,7 +206,6 @@ export const adminAPI = {
   getStats: () => api.get('/admin/stats'),
   getClients: (params) => api.get('/admin/clients', { params }),
   getClient: (id) => api.get(`/admin/client/${id}`),
-  getVoicemails: (params) => api.get('/admin/voicemails', { params }),
   getLeads: (params) => api.get('/admin/leads', { params }),
   getCalls: (params) => api.get('/admin/calls', { params }),
 }

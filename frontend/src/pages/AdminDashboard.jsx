@@ -3,18 +3,13 @@ import { adminAPI } from '../lib/api'
 import {
   Users,
   Phone,
-  Voicemail,
   UserCheck,
   CalendarCheck,
   TrendingUp,
-  AlertTriangle,
   Building2,
-  PhoneCall,
-  HelpCircle,
   Calendar,
   ArrowUpRight,
   Search,
-  Play,
   PhoneMissed
 } from 'lucide-react'
 
@@ -58,22 +53,10 @@ function ClientCard({ client }) {
         </div>
       </div>
 
-      <div className="grid grid-cols-7 gap-1 text-center">
+      <div className="grid grid-cols-5 gap-1 text-center">
         <div className="p-2 rounded bg-dark-800/50">
           <p className="text-lg font-bold text-danger-400">{client.stats.missedCalls}</p>
           <p className="text-[10px] text-dark-500">Missed</p>
-        </div>
-        <div className="p-2 rounded bg-dark-800/50">
-          <p className="text-lg font-bold text-warning-400">{client.stats.totalVoicemails}</p>
-          <p className="text-[10px] text-dark-500">VMs</p>
-        </div>
-        <div className="p-2 rounded bg-dark-800/50">
-          <p className="text-lg font-bold text-purple-400">{client.stats.totalAppointments}</p>
-          <p className="text-[10px] text-dark-500">Appts</p>
-        </div>
-        <div className="p-2 rounded bg-dark-800/50">
-          <p className="text-lg font-bold text-accent-400">{client.stats.callbackRequests}</p>
-          <p className="text-[10px] text-dark-500">Callbacks</p>
         </div>
         <div className="p-2 rounded bg-dark-800/50">
           <p className="text-lg font-bold text-dark-100">{client.stats.totalLeads}</p>
@@ -84,72 +67,12 @@ function ClientCard({ client }) {
           <p className="text-[10px] text-dark-500">Booked</p>
         </div>
         <div className="p-2 rounded bg-dark-800/50">
+          <p className="text-lg font-bold text-purple-400">{client.stats.totalAppointments}</p>
+          <p className="text-[10px] text-dark-500">Appts</p>
+        </div>
+        <div className="p-2 rounded bg-dark-800/50">
           <p className="text-lg font-bold text-blue-400">{client.stats.upcomingAppointments}</p>
           <p className="text-[10px] text-dark-500">Upcoming</p>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function VoicemailCard({ voicemail }) {
-  const getIntentStyle = (intent) => {
-    const styles = {
-      emergency: { bg: 'bg-danger-500/10 text-danger-400 border-danger-500/20', icon: AlertTriangle },
-      appointment: { bg: 'bg-success-500/10 text-success-400 border-success-500/20', icon: CalendarCheck },
-      callback: { bg: 'bg-accent-500/10 text-accent-400 border-accent-500/20', icon: PhoneCall },
-      inquiry: { bg: 'bg-purple-500/10 text-purple-400 border-purple-500/20', icon: HelpCircle },
-      other: { bg: 'bg-dark-600/50 text-dark-400 border-dark-600/50', icon: Voicemail }
-    }
-    return styles[intent] || styles.other
-  }
-
-  const intentInfo = getIntentStyle(voicemail.intent)
-  const IntentIcon = intentInfo.icon
-
-  const formatDuration = (seconds) => {
-    if (!seconds) return '0:00'
-    const mins = Math.floor(seconds / 60)
-    const secs = seconds % 60
-    return `${mins}:${secs.toString().padStart(2, '0')}`
-  }
-
-  return (
-    <div className={`p-4 rounded-lg bg-dark-800/30 hover:bg-dark-800/50 transition-colors ${voicemail.intent === 'emergency' ? 'border border-danger-500/30' : ''}`}>
-      <div className="flex items-start gap-3">
-        <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${voicemail.intent === 'emergency' ? 'bg-danger-500/20' : 'bg-dark-700'}`}>
-          <IntentIcon className={`w-5 h-5 ${voicemail.intent === 'emergency' ? 'text-danger-400' : 'text-dark-400'}`} />
-        </div>
-
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-1">
-            <p className="text-sm font-medium text-dark-200">{voicemail.callerName}</p>
-            <span className={`px-2 py-0.5 rounded-full text-xs font-medium border ${intentInfo.bg}`}>
-              {voicemail.intent || 'other'}
-            </span>
-          </div>
-          <p className="text-xs text-dark-500 mb-1">{voicemail.callerPhone}</p>
-          <p className="text-xs text-accent-400">{voicemail.clientName}</p>
-
-          {voicemail.transcription && (
-            <p className="text-xs text-dark-400 italic mt-2 line-clamp-2">
-              "{voicemail.transcription}"
-            </p>
-          )}
-        </div>
-
-        <div className="text-right flex flex-col items-end gap-2">
-          <p className="text-xs text-dark-500">
-            {new Date(voicemail.createdAt).toLocaleTimeString('en-US', {
-              hour: 'numeric',
-              minute: '2-digit',
-              hour12: true
-            })}
-          </p>
-          <div className="flex items-center gap-1 text-xs text-dark-400">
-            <Play className="w-3 h-3" />
-            <span>{formatDuration(voicemail.duration)}</span>
-          </div>
         </div>
       </div>
     </div>
@@ -159,22 +82,19 @@ function VoicemailCard({ voicemail }) {
 export default function AdminDashboard() {
   const [stats, setStats] = useState(null)
   const [clients, setClients] = useState([])
-  const [voicemails, setVoicemails] = useState([])
   const [loading, setLoading] = useState(true)
   const [searchTerm, setSearchTerm] = useState('')
 
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const [statsRes, clientsRes, voicemailsRes] = await Promise.all([
+        const [statsRes, clientsRes] = await Promise.all([
           adminAPI.getStats(),
-          adminAPI.getClients({ limit: 10 }),
-          adminAPI.getVoicemails({ limit: 10 })
+          adminAPI.getClients({ limit: 10 })
         ])
 
         setStats(statsRes.data.stats)
         setClients(clientsRes.data.clients)
-        setVoicemails(voicemailsRes.data.voicemails)
       } catch (error) {
         console.error('Failed to fetch admin data:', error)
       } finally {
@@ -228,7 +148,7 @@ export default function AdminDashboard() {
       </div>
 
       {/* Stats Grid */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 lg:gap-4">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 lg:gap-4">
         <StatCard
           title="Clients"
           value={stats?.totalClients || 0}
@@ -242,13 +162,6 @@ export default function AdminDashboard() {
           icon={PhoneMissed}
           gradient="from-danger-500 to-danger-600"
           subtitle={`${stats?.totalCalls || 0} total calls`}
-        />
-        <StatCard
-          title="Voicemails"
-          value={stats?.totalVoicemails || 0}
-          icon={Voicemail}
-          gradient="from-warning-500 to-warning-600"
-          subtitle={`${stats?.callbackRequests || 0} callbacks`}
         />
         <StatCard
           title="Leads"
@@ -294,62 +207,31 @@ export default function AdminDashboard() {
         </button>
       </div>
 
-      {/* Main Content Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Clients */}
-        <div className="card">
-          <div className="flex items-center justify-between mb-6">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-lg bg-accent-500/10 flex items-center justify-center">
-                <Users className="w-5 h-5 text-accent-400" />
-              </div>
-              <div>
-                <h3 className="font-semibold text-dark-100">Clients</h3>
-                <p className="text-xs text-dark-500">{stats?.totalClients || 0} total dentists</p>
-              </div>
+      {/* Clients */}
+      <div className="card">
+        <div className="flex items-center justify-between mb-6">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-lg bg-accent-500/10 flex items-center justify-center">
+              <Users className="w-5 h-5 text-accent-400" />
             </div>
-          </div>
-
-          <div className="space-y-3">
-            {clients.length > 0 ? (
-              clients.map((client) => (
-                <ClientCard key={client.id} client={client} />
-              ))
-            ) : (
-              <div className="text-center py-8">
-                <Users className="w-8 h-8 text-dark-600 mx-auto mb-3" />
-                <p className="text-dark-400 text-sm">No clients found</p>
-              </div>
-            )}
+            <div>
+              <h3 className="font-semibold text-dark-100">Clients</h3>
+              <p className="text-xs text-dark-500">{stats?.totalClients || 0} total dentists</p>
+            </div>
           </div>
         </div>
 
-        {/* Voicemails */}
-        <div className="card">
-          <div className="flex items-center justify-between mb-6">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-lg bg-warning-500/10 flex items-center justify-center">
-                <Voicemail className="w-5 h-5 text-warning-400" />
-              </div>
-              <div>
-                <h3 className="font-semibold text-dark-100">Recent Voicemails</h3>
-                <p className="text-xs text-dark-500">Across all clients, sorted by urgency</p>
-              </div>
+        <div className="space-y-3">
+          {clients.length > 0 ? (
+            clients.map((client) => (
+              <ClientCard key={client.id} client={client} />
+            ))
+          ) : (
+            <div className="text-center py-8">
+              <Users className="w-8 h-8 text-dark-600 mx-auto mb-3" />
+              <p className="text-dark-400 text-sm">No clients found</p>
             </div>
-          </div>
-
-          <div className="space-y-3">
-            {voicemails.length > 0 ? (
-              voicemails.map((vm) => (
-                <VoicemailCard key={vm.id} voicemail={vm} />
-              ))
-            ) : (
-              <div className="text-center py-8">
-                <Voicemail className="w-8 h-8 text-dark-600 mx-auto mb-3" />
-                <p className="text-dark-400 text-sm">No voicemails yet</p>
-              </div>
-            )}
-          </div>
+          )}
         </div>
       </div>
     </div>

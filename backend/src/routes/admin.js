@@ -16,8 +16,6 @@ router.get('/stats', async (req, res) => {
         (SELECT COUNT(*) FROM users WHERE is_admin = false) as total_clients,
         (SELECT COUNT(*) FROM calls) as total_calls,
         (SELECT COUNT(*) FROM calls WHERE is_missed = true) as missed_calls,
-        (SELECT COUNT(*) FROM calls WHERE voicemail_url IS NOT NULL AND voicemail_duration >= 3) as total_voicemails,
-        (SELECT COUNT(*) FROM calls WHERE voicemail_intent = 'callback') as callback_requests,
         (SELECT COUNT(*) FROM leads) as total_leads,
         (SELECT COUNT(*) FROM leads WHERE status = 'converted') as converted_leads,
         (SELECT COUNT(*) FROM leads WHERE appointment_booked = true) as booked_leads,
@@ -32,8 +30,6 @@ router.get('/stats', async (req, res) => {
         totalClients: parseInt(stats.total_clients) || 0,
         totalCalls: parseInt(stats.total_calls) || 0,
         missedCalls: parseInt(stats.missed_calls) || 0,
-        totalVoicemails: parseInt(stats.total_voicemails) || 0,
-        callbackRequests: parseInt(stats.callback_requests) || 0,
         totalLeads: parseInt(stats.total_leads) || 0,
         convertedLeads: parseInt(stats.converted_leads) || 0,
         bookedLeads: parseInt(stats.booked_leads) || 0,
@@ -86,8 +82,6 @@ router.get('/clients', async (req, res) => {
         s.forwarding_phone,
         (SELECT COUNT(*) FROM calls c WHERE c.user_id = u.id) as total_calls,
         (SELECT COUNT(*) FROM calls c WHERE c.user_id = u.id AND c.is_missed = true) as missed_calls,
-        (SELECT COUNT(*) FROM calls c WHERE c.user_id = u.id AND c.voicemail_url IS NOT NULL AND c.voicemail_duration >= 3) as total_voicemails,
-        (SELECT COUNT(*) FROM calls c WHERE c.user_id = u.id AND c.voicemail_intent = 'callback') as callback_requests,
         (SELECT COUNT(*) FROM leads l WHERE l.user_id = u.id) as total_leads,
         (SELECT COUNT(*) FROM leads l WHERE l.user_id = u.id AND l.status = 'converted') as converted_leads,
         (SELECT COUNT(*) FROM leads l WHERE l.user_id = u.id AND l.appointment_booked = true) as booked_leads,
@@ -114,8 +108,6 @@ router.get('/clients', async (req, res) => {
         stats: {
           totalCalls: parseInt(client.total_calls) || 0,
           missedCalls: parseInt(client.missed_calls) || 0,
-          totalVoicemails: parseInt(client.total_voicemails) || 0,
-          callbackRequests: parseInt(client.callback_requests) || 0,
           totalLeads: parseInt(client.total_leads) || 0,
           convertedLeads: parseInt(client.converted_leads) || 0,
           bookedLeads: parseInt(client.booked_leads) || 0,
@@ -133,94 +125,6 @@ router.get('/clients', async (req, res) => {
   } catch (error) {
     console.error('Admin clients error:', error);
     res.status(500).json({ error: { message: 'Failed to fetch clients' } });
-  }
-});
-
-// GET /api/admin/voicemails - All voicemails across all clients
-router.get('/voicemails', async (req, res) => {
-  try {
-    const { page = 1, limit = 20, intent, clientId } = req.query;
-    const offset = (page - 1) * limit;
-
-    let whereClause = 'WHERE c.voicemail_url IS NOT NULL AND c.voicemail_duration >= 3';
-    const params = [];
-    let paramCount = 0;
-
-    if (intent && intent !== 'all') {
-      paramCount++;
-      whereClause += ` AND c.voicemail_intent = $${paramCount}`;
-      params.push(intent);
-    }
-
-    if (clientId) {
-      paramCount++;
-      whereClause += ` AND c.user_id = $${paramCount}`;
-      params.push(clientId);
-    }
-
-    // Get total count
-    const countResult = await query(
-      `SELECT COUNT(*) FROM calls c ${whereClause}`,
-      params
-    );
-    const total = parseInt(countResult.rows[0].count);
-
-    // Get voicemails
-    const result = await query(
-      `SELECT
-        c.id,
-        c.user_id,
-        u.practice_name,
-        u.email as client_email,
-        c.caller_phone,
-        c.caller_name,
-        c.voicemail_url,
-        c.voicemail_duration,
-        c.voicemail_transcription,
-        c.voicemail_intent,
-        c.followup_status,
-        c.created_at
-       FROM calls c
-       JOIN users u ON c.user_id = u.id
-       ${whereClause}
-       ORDER BY
-         CASE c.voicemail_intent
-           WHEN 'emergency' THEN 1
-           WHEN 'appointment' THEN 2
-           WHEN 'callback' THEN 3
-           WHEN 'inquiry' THEN 4
-           ELSE 5
-         END,
-         c.created_at DESC
-       LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}`,
-      [...params, limit, offset]
-    );
-
-    res.json({
-      voicemails: result.rows.map(vm => ({
-        id: vm.id,
-        clientId: vm.user_id,
-        clientName: vm.practice_name,
-        clientEmail: vm.client_email,
-        callerPhone: vm.caller_phone,
-        callerName: vm.caller_name || 'Unknown Caller',
-        voicemailUrl: vm.voicemail_url,
-        duration: vm.voicemail_duration,
-        transcription: vm.voicemail_transcription,
-        intent: vm.voicemail_intent,
-        followupStatus: vm.followup_status,
-        createdAt: vm.created_at
-      })),
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total,
-        totalPages: Math.ceil(total / limit)
-      }
-    });
-  } catch (error) {
-    console.error('Admin voicemails error:', error);
-    res.status(500).json({ error: { message: 'Failed to fetch voicemails' } });
   }
 });
 
@@ -340,8 +244,6 @@ router.get('/calls', async (req, res) => {
         c.status,
         c.duration,
         c.is_missed,
-        c.voicemail_url,
-        c.voicemail_intent,
         c.followup_status,
         c.created_at
        FROM calls c
@@ -362,8 +264,6 @@ router.get('/calls', async (req, res) => {
         status: call.status,
         duration: call.duration,
         isMissed: call.is_missed,
-        hasVoicemail: !!call.voicemail_url,
-        voicemailIntent: call.voicemail_intent,
         followupStatus: call.followup_status,
         createdAt: call.created_at
       })),

@@ -53,7 +53,6 @@ router.get('/', async (req, res) => {
     const result = await query(
       `SELECT id, twilio_call_sid, caller_phone, caller_name, call_reason, duration,
               recording_url, transcription, status, sentiment, ai_summary, created_at,
-              voicemail_url, voicemail_duration, voicemail_transcription, voicemail_intent,
               followup_status, is_missed
        FROM calls
        ${whereClause}
@@ -76,10 +75,6 @@ router.get('/', async (req, res) => {
         sentiment: call.sentiment,
         aiSummary: call.ai_summary,
         createdAt: call.created_at,
-        voicemailUrl: call.voicemail_url,
-        voicemailDuration: call.voicemail_duration,
-        voicemailTranscription: call.voicemail_transcription,
-        voicemailIntent: call.voicemail_intent,
         followupStatus: call.followup_status,
         isMissed: call.is_missed
       })),
@@ -93,74 +88,6 @@ router.get('/', async (req, res) => {
   } catch (error) {
     console.error('Get calls error:', error);
     res.status(500).json({ error: { message: 'Failed to fetch calls' } });
-  }
-});
-
-// GET /api/calls/voicemails - Get voicemails with transcription and intent
-router.get('/voicemails', async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const { limit = 10, status } = req.query;
-
-    let whereClause = 'WHERE c.user_id = $1 AND c.voicemail_url IS NOT NULL AND c.voicemail_duration >= 3';
-    const params = [userId];
-    let paramCount = 1;
-
-    if (status && status !== 'all') {
-      paramCount++;
-      whereClause += ` AND c.followup_status = $${paramCount}`;
-      params.push(status);
-    }
-
-    const result = await query(
-      `SELECT
-        c.id,
-        c.caller_phone,
-        c.caller_name,
-        c.voicemail_url,
-        c.voicemail_duration,
-        c.voicemail_transcription,
-        c.voicemail_intent,
-        c.followup_status,
-        c.created_at,
-        l.id as lead_id,
-        l.status as lead_status,
-        l.name as lead_name
-       FROM calls c
-       LEFT JOIN leads l ON l.call_id = c.id
-       ${whereClause}
-       ORDER BY
-         CASE c.voicemail_intent
-           WHEN 'emergency' THEN 1
-           WHEN 'appointment' THEN 2
-           WHEN 'callback' THEN 3
-           WHEN 'inquiry' THEN 4
-           WHEN 'other' THEN 5
-           ELSE 6
-         END,
-         c.created_at DESC
-       LIMIT $${paramCount + 1}`,
-      [...params, limit]
-    );
-
-    res.json({
-      voicemails: result.rows.map(vm => ({
-        id: vm.id,
-        callerPhone: vm.caller_phone,
-        callerName: vm.caller_name || vm.lead_name || 'Unknown Caller',
-        voicemailUrl: vm.voicemail_url,
-        duration: vm.voicemail_duration,
-        transcription: vm.voicemail_transcription,
-        intent: vm.voicemail_intent,
-        followupStatus: vm.followup_status,
-        createdAt: vm.created_at,
-        leadId: vm.lead_id,
-        leadStatus: vm.lead_status
-      }))
-    });
-  } catch (error) {
-    console.error('Get voicemails error:', error);
-    res.status(500).json({ error: { message: 'Failed to fetch voicemails' } });
   }
 });
 
