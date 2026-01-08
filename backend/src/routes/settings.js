@@ -1,8 +1,10 @@
 const express = require('express');
+const crypto = require('crypto');
 const { query } = require('../db/config');
 const { authenticate } = require('../middleware/auth');
 const { encrypt, decrypt } = require('../utils/crypto');
 const { validate, schemas } = require('../middleware/validate');
+const cellcast = require('../services/cellcast');
 
 const router = express.Router();
 
@@ -232,15 +234,203 @@ router.put('/ai-greeting', async (req, res) => {
   }
 });
 
+// PUT /api/settings/pbx - Update PBX/phone system settings
+router.put('/pbx', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { businessPhone, pbxType, forwardingPhone } = req.body;
+
+    // Generate webhook secret if not exists
+    let webhookSecret = null;
+    const existingSettings = await query(
+      'SELECT pbx_webhook_secret FROM settings WHERE user_id = $1',
+      [userId]
+    );
+
+    if (!existingSettings.rows[0]?.pbx_webhook_secret) {
+      webhookSecret = crypto.randomBytes(32).toString('hex');
+    }
+
+    const result = await query(
+      `UPDATE settings
+       SET business_phone = COALESCE($1, business_phone),
+           pbx_type = COALESCE($2, pbx_type),
+           forwarding_phone = COALESCE($3, forwarding_phone),
+           pbx_webhook_secret = COALESCE($4, pbx_webhook_secret)
+       WHERE user_id = $5
+       RETURNING *`,
+      [businessPhone, pbxType, forwardingPhone, webhookSecret, userId]
+    );
+
+    res.json({
+      message: 'Phone system settings updated',
+      settings: formatSettings(result.rows[0])
+    });
+  } catch (error) {
+    console.error('Update PBX settings error:', error);
+    res.status(500).json({ error: { message: 'Failed to update phone system settings' } });
+  }
+});
+
+// PUT /api/settings/sms - Update SMS settings (CellCast)
+router.put('/sms', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { cellcastApiKey, smsReplyNumber } = req.body;
+
+    // Encrypt API key if provided
+    const encryptedApiKey = cellcastApiKey ? encrypt(cellcastApiKey) : null;
+
+    const result = await query(
+      `UPDATE settings
+       SET cellcast_api_key = COALESCE($1, cellcast_api_key),
+           sms_reply_number = COALESCE($2, sms_reply_number)
+       WHERE user_id = $3
+       RETURNING *`,
+      [encryptedApiKey, smsReplyNumber, userId]
+    );
+
+    res.json({
+      message: 'SMS settings updated',
+      settings: formatSettings(result.rows[0])
+    });
+  } catch (error) {
+    console.error('Update SMS settings error:', error);
+    res.status(500).json({ error: { message: 'Failed to update SMS settings' } });
+  }
+});
+
+// POST /api/settings/sms/test - Test CellCast SMS configuration
+router.post('/sms/test', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { testPhone } = req.body;
+
+    if (!testPhone) {
+      return res.status(400).json({ error: { message: 'Test phone number is required' } });
+    }
+
+    // Get settings
+    const settingsResult = await query(
+      'SELECT cellcast_api_key, sms_reply_number FROM settings WHERE user_id = $1',
+      [userId]
+    );
+
+    if (!settingsResult.rows[0]?.cellcast_api_key) {
+      return res.status(400).json({ error: { message: 'CellCast API key not configured' } });
+    }
+
+    const apiKey = decrypt(settingsResult.rows[0].cellcast_api_key);
+    const fromNumber = settingsResult.rows[0].sms_reply_number || process.env.CELLCAST_PHONE_NUMBER;
+
+    // Send test SMS
+    const result = await cellcast.sendSMS(
+      apiKey,
+      testPhone,
+      'This is a test message from SmileDesk. Your SMS configuration is working!',
+      fromNumber
+    );
+
+    if (result.success) {
+      res.json({ success: true, message: 'Test SMS sent successfully' });
+    } else {
+      res.status(400).json({ error: { message: result.error || 'Failed to send test SMS' } });
+    }
+  } catch (error) {
+    console.error('Test SMS error:', error);
+    res.status(500).json({ error: { message: 'Failed to test SMS configuration' } });
+  }
+});
+
+// GET /api/settings/webhook-urls - Get webhook URLs for user's PBX
+router.get('/webhook-urls', async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    // Get settings
+    const settingsResult = await query(
+      'SELECT pbx_type, pbx_webhook_secret FROM settings WHERE user_id = $1',
+      [userId]
+    );
+
+    if (!settingsResult.rows[0]) {
+      return res.status(404).json({ error: { message: 'Settings not found' } });
+    }
+
+    const { pbx_type, pbx_webhook_secret } = settingsResult.rows[0];
+    const baseUrl = process.env.API_URL || 'https://your-app.com';
+
+    // Generate webhook URLs based on PBX type
+    const pbxEndpoint = pbx_type && pbx_type !== 'other' ? `/api/pbx/missed-call/${pbx_type}` : '/api/pbx/missed-call';
+
+    res.json({
+      webhooks: {
+        missedCall: `${baseUrl}${pbxEndpoint}`,
+        smsIncoming: `${baseUrl}/api/sms/incoming`,
+        smsStatus: `${baseUrl}/api/sms/status`
+      },
+      webhookSecret: pbx_webhook_secret,
+      pbxType: pbx_type,
+      instructions: {
+        header: 'X-Webhook-Secret',
+        method: 'POST',
+        contentType: 'application/json'
+      }
+    });
+  } catch (error) {
+    console.error('Get webhook URLs error:', error);
+    res.status(500).json({ error: { message: 'Failed to get webhook URLs' } });
+  }
+});
+
+// POST /api/settings/regenerate-webhook-secret - Regenerate webhook secret
+router.post('/regenerate-webhook-secret', async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const newSecret = crypto.randomBytes(32).toString('hex');
+
+    const result = await query(
+      `UPDATE settings SET pbx_webhook_secret = $1 WHERE user_id = $2 RETURNING *`,
+      [newSecret, userId]
+    );
+
+    res.json({
+      message: 'Webhook secret regenerated',
+      webhookSecret: newSecret
+    });
+  } catch (error) {
+    console.error('Regenerate webhook secret error:', error);
+    res.status(500).json({ error: { message: 'Failed to regenerate webhook secret' } });
+  }
+});
+
 // Helper function to format settings for API response
 function formatSettings(settings) {
+  // Generate webhook URL
+  const baseUrl = process.env.API_URL || 'https://your-app.com';
+  const pbxType = settings.pbx_type || 'other';
+  const pbxEndpoint = pbxType !== 'other' ? `/api/pbx/missed-call/${pbxType}` : '/api/pbx/missed-call';
+
   return {
     id: settings.id,
+    // Legacy Twilio fields (will be deprecated)
     twilioPhone: settings.twilio_phone,
-    forwardingPhone: settings.forwarding_phone,
     twilioAccountSid: settings.twilio_account_sid ? '••••' + settings.twilio_account_sid.slice(-4) : null,
     twilioAuthToken: settings.twilio_auth_token ? '••••••••' : null,
     hasTwilioCredentials: !!(settings.twilio_account_sid && settings.twilio_auth_token),
+    // Phone system settings
+    businessPhone: settings.business_phone,
+    forwardingPhone: settings.forwarding_phone,
+    pbxType: settings.pbx_type || 'other',
+    pbxWebhookSecret: settings.pbx_webhook_secret ? '••••' + settings.pbx_webhook_secret.slice(-8) : null,
+    hasPbxWebhookSecret: !!settings.pbx_webhook_secret,
+    // SMS settings (CellCast)
+    smsReplyNumber: settings.sms_reply_number,
+    hasCellcastCredentials: !!settings.cellcast_api_key,
+    // Webhook URL (for display)
+    webhookUrl: `${baseUrl}${pbxEndpoint}`,
+    // Other settings
     notificationEmail: settings.notification_email,
     notificationSms: settings.notification_sms,
     bookingMode: settings.booking_mode,

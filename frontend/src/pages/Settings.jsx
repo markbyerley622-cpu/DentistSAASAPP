@@ -13,7 +13,10 @@ import {
   X,
   AlertCircle,
   Save,
-  Loader2
+  Loader2,
+  Copy,
+  Link,
+  RefreshCw
 } from 'lucide-react'
 
 function SettingsSection({ title, description, icon: Icon, children }) {
@@ -93,14 +96,20 @@ export default function Settings() {
   const [settings, setSettings] = useState({
     twilioPhone: '',
     forwardingPhone: '',
-    twilioAccountSid: '',
-    twilioAuthToken: '',
+    businessPhone: '',
+    pbxType: 'other',
+    smsReplyNumber: '',
+    webhookUrl: '',
+    hasPbxWebhookSecret: false,
     notificationEmail: true,
     notificationSms: false,
     bookingMode: 'manual',
     aiGreeting: '',
     businessHours: {}
   })
+
+  const [webhookUrls, setWebhookUrls] = useState(null)
+  const [showWebhook, setShowWebhook] = useState(false)
 
   const [savingBusinessHours, setSavingBusinessHours] = useState(false)
 
@@ -120,22 +129,26 @@ export default function Settings() {
     const fetchData = async () => {
       try {
         const settingsRes = await settingsAPI.get()
+        const s = settingsRes.data.settings
 
         setSettings({
-          twilioPhone: settingsRes.data.settings.twilioPhone || '',
-          forwardingPhone: settingsRes.data.settings.forwardingPhone || '',
-          twilioAccountSid: settingsRes.data.settings.twilioAccountSid || '',
-          twilioAuthToken: '',
-          notificationEmail: settingsRes.data.settings.notificationEmail,
-          notificationSms: settingsRes.data.settings.notificationSms,
-          bookingMode: settingsRes.data.settings.bookingMode,
-          aiGreeting: settingsRes.data.settings.aiGreeting || '',
-          businessHours: settingsRes.data.settings.businessHours || {}
+          twilioPhone: s.twilioPhone || '',
+          forwardingPhone: s.forwardingPhone || '',
+          businessPhone: s.businessPhone || '',
+          pbxType: s.pbxType || 'other',
+          smsReplyNumber: s.smsReplyNumber || '',
+          webhookUrl: s.webhookUrl || '',
+          hasPbxWebhookSecret: s.hasPbxWebhookSecret || false,
+          notificationEmail: s.notificationEmail,
+          notificationSms: s.notificationSms,
+          bookingMode: s.bookingMode,
+          aiGreeting: s.aiGreeting || '',
+          businessHours: s.businessHours || {}
         })
 
         // Load business hours from settings or use defaults
-        if (settingsRes.data.settings.businessHours && Object.keys(settingsRes.data.settings.businessHours).length > 0) {
-          setBusinessHours(settingsRes.data.settings.businessHours)
+        if (s.businessHours && Object.keys(s.businessHours).length > 0) {
+          setBusinessHours(s.businessHours)
         }
 
         setProfile({
@@ -152,6 +165,23 @@ export default function Settings() {
 
     fetchData()
   }, [user])
+
+  const fetchWebhookUrls = async () => {
+    try {
+      const res = await settingsAPI.getWebhookUrls()
+      setWebhookUrls(res.data)
+      setShowWebhook(true)
+    } catch (error) {
+      console.error('Failed to fetch webhook URLs:', error)
+      setError('Failed to load webhook configuration')
+    }
+  }
+
+  const copyToClipboard = (text) => {
+    navigator.clipboard.writeText(text)
+    setSuccess('Copied to clipboard!')
+    setTimeout(() => setSuccess(''), 2000)
+  }
 
   const handleSaveProfile = async () => {
     setSaving(true)
@@ -196,6 +226,29 @@ export default function Settings() {
       setSuccess('Phone number saved!')
     } catch (err) {
       setError(err.response?.data?.error?.message || 'Failed to save phone number')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleSavePbxSettings = async () => {
+    setSaving(true)
+    try {
+      await settingsAPI.updatePbx({
+        businessPhone: settings.businessPhone,
+        pbxType: settings.pbxType,
+        forwardingPhone: settings.forwardingPhone
+      })
+      // Refresh settings to get updated webhook URL
+      const settingsRes = await settingsAPI.get()
+      setSettings(prev => ({
+        ...prev,
+        webhookUrl: settingsRes.data.settings.webhookUrl,
+        hasPbxWebhookSecret: settingsRes.data.settings.hasPbxWebhookSecret
+      }))
+      setSuccess('Phone system settings saved!')
+    } catch (err) {
+      setError(err.response?.data?.error?.message || 'Failed to save phone system settings')
     } finally {
       setSaving(false)
     }
@@ -325,44 +378,55 @@ export default function Settings() {
         </div>
       </SettingsSection>
 
-      {/* Twilio Phone Number */}
+      {/* Phone System Configuration */}
       <SettingsSection
-        title="Your Twilio Number"
-        description="This is your dedicated patient line - add it to your phone system"
+        title="Phone System"
+        description="Configure your phone system for automatic SMS follow-ups on missed calls"
         icon={Phone}
       >
         <div className="space-y-4">
-          {settings.twilioPhone ? (
-            <>
-              <div className="p-4 rounded-lg bg-accent-500/10 border border-accent-500/20">
-                <p className="text-xs text-accent-400 mb-2">Your Twilio Phone Number</p>
-                <p className="text-2xl font-bold text-dark-100 tracking-wide">{settings.twilioPhone}</p>
-              </div>
-              <div className="p-3 rounded-lg bg-dark-800/50 border border-dark-700/50">
-                <p className="text-sm text-dark-300">
-                  Add this number to your phone system or give it to patients. Missed calls will trigger automatic SMS follow-ups.
-                </p>
-              </div>
-            </>
-          ) : (
-            <div className="p-4 rounded-lg bg-warning-500/10 border border-warning-500/20">
-              <p className="text-sm text-warning-400">
-                No Twilio number assigned yet. Contact support to get your dedicated patient line set up.
+          {/* Info banner */}
+          <div className="p-4 rounded-lg bg-accent-500/10 border border-accent-500/20">
+            <p className="text-sm text-accent-300">
+              When patients call your business number and you miss the call (and they don't leave a voicemail), they'll automatically receive an SMS to book an appointment.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="input-group">
+              <label className="input-label">Business Phone Number</label>
+              <input
+                type="tel"
+                value={settings.businessPhone || ''}
+                onChange={(e) => setSettings({ ...settings, businessPhone: e.target.value })}
+                className="input"
+                placeholder="+61298765432"
+              />
+              <p className="text-xs text-dark-500 mt-1">
+                Your main practice number that patients call
               </p>
             </div>
-          )}
-        </div>
-      </SettingsSection>
 
-      {/* Call Forwarding */}
-      <SettingsSection
-        title="Call Forwarding"
-        description="Enter the phone number where patient calls should be forwarded"
-        icon={Phone}
-      >
-        <div className="space-y-4">
+            <div className="input-group">
+              <label className="input-label">Phone System Type</label>
+              <select
+                value={settings.pbxType || 'other'}
+                onChange={(e) => setSettings({ ...settings, pbxType: e.target.value })}
+                className="input"
+              >
+                <option value="other">Other / Generic</option>
+                <option value="3cx">3CX</option>
+                <option value="ringcentral">RingCentral</option>
+                <option value="vonage">Vonage</option>
+                <option value="freepbx">FreePBX / Asterisk</option>
+                <option value="8x8">8x8</option>
+                <option value="zoom">Zoom Phone</option>
+              </select>
+            </div>
+          </div>
+
           <div className="input-group">
-            <label className="input-label">Your Phone Number</label>
+            <label className="input-label">Call Forwarding Number (Optional)</label>
             <input
               type="tel"
               value={settings.forwardingPhone || ''}
@@ -371,14 +435,83 @@ export default function Settings() {
               placeholder="+61414855294"
             />
             <p className="text-xs text-dark-500 mt-1">
-              Business or personal - calls ring here first. If you miss a call, the patient gets an automatic SMS follow-up.
+              Your mobile or alternate number where calls should ring
             </p>
           </div>
 
-          <button onClick={handleSaveForwarding} disabled={saving} className="btn-primary">
+          {/* SMS Reply Number */}
+          {settings.smsReplyNumber && (
+            <div className="p-3 rounded-lg bg-dark-800/50 border border-dark-700/50">
+              <p className="text-xs text-dark-400 mb-1">SMS Reply Number</p>
+              <p className="text-lg font-semibold text-dark-100">{settings.smsReplyNumber}</p>
+              <p className="text-xs text-dark-500 mt-1">
+                This is the number patients will receive SMS from and reply to
+              </p>
+            </div>
+          )}
+
+          <button onClick={handleSavePbxSettings} disabled={saving} className="btn-primary">
             {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-            <span className="ml-2">Save</span>
+            <span className="ml-2">Save Phone Settings</span>
           </button>
+
+          {/* Webhook Configuration */}
+          <div className="pt-4 border-t border-dark-700/50">
+            <button
+              onClick={fetchWebhookUrls}
+              className="text-sm text-accent-400 hover:text-accent-300 flex items-center gap-2"
+            >
+              <Link className="w-4 h-4" />
+              <span>View Webhook Configuration</span>
+            </button>
+
+            {showWebhook && webhookUrls && (
+              <div className="mt-4 p-4 rounded-lg bg-dark-800/50 border border-dark-700/50 space-y-3">
+                <p className="text-sm font-medium text-dark-200">Webhook URLs for your phone system:</p>
+
+                <div className="space-y-2">
+                  <div>
+                    <p className="text-xs text-dark-400">Missed Call Webhook</p>
+                    <div className="flex items-center gap-2">
+                      <code className="flex-1 text-xs text-accent-400 bg-dark-900/50 px-2 py-1 rounded overflow-x-auto">
+                        {webhookUrls.webhooks?.missedCall}
+                      </code>
+                      <button
+                        onClick={() => copyToClipboard(webhookUrls.webhooks?.missedCall)}
+                        className="text-dark-400 hover:text-dark-200"
+                      >
+                        <Copy className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <p className="text-xs text-dark-400">Webhook Secret</p>
+                    <div className="flex items-center gap-2">
+                      <code className="flex-1 text-xs text-accent-400 bg-dark-900/50 px-2 py-1 rounded overflow-x-auto">
+                        {webhookUrls.webhookSecret || 'Not generated'}
+                      </code>
+                      <button
+                        onClick={() => copyToClipboard(webhookUrls.webhookSecret)}
+                        className="text-dark-400 hover:text-dark-200"
+                      >
+                        <Copy className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="text-xs text-dark-500 space-y-1 pt-2">
+                  <p>Configure your phone system to send a POST request to the webhook URL when:</p>
+                  <ul className="list-disc list-inside ml-2">
+                    <li>A call is missed (not answered)</li>
+                    <li>The caller did NOT leave a voicemail</li>
+                  </ul>
+                  <p className="mt-2">Include header: <code className="text-accent-400">X-Webhook-Secret: [your secret]</code></p>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </SettingsSection>
 

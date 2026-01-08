@@ -15,6 +15,8 @@ const bookingSlotsRoutes = require('./routes/bookingSlots');
 const conversationsRoutes = require('./routes/conversations');
 const appointmentsRoutes = require('./routes/appointments');
 const adminRoutes = require('./routes/admin');
+const pbxRoutes = require('./routes/pbx');
+const smsRoutes = require('./routes/sms');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -40,13 +42,15 @@ app.get('/health', (req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/calls', callsRoutes);
 app.use('/api/leads', leadsRoutes);
-app.use('/api/twilio', twilioRoutes);
+app.use('/api/twilio', twilioRoutes); // Legacy - will be removed
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/booking-slots', bookingSlotsRoutes);
 app.use('/api/conversations', conversationsRoutes);
 app.use('/api/appointments', appointmentsRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/pbx', pbxRoutes);     // PBX missed call webhooks
+app.use('/api/sms', smsRoutes);     // CellCast SMS webhooks
 
 // Error handling middleware
 app.use((err, req, res, next) => {
