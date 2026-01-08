@@ -55,17 +55,18 @@ async function sendSMS(apiKey, to, message, from = null) {
 
     console.log('CellCast: Response', JSON.stringify(response));
 
-    if (response.success || response.status === 'success' || response.data) {
+    // CellCast returns { meta: { code: 200, status: 'SUCCESS' }, msg: 'Queued', data: {...} }
+    if (response.meta?.status === 'SUCCESS' || response.meta?.code === 200) {
       return {
         success: true,
-        messageId: response.message_id || response.id || response.data?.id || 'sent',
+        messageId: response.data?.messages?.[0]?.message_id || 'sent',
         response: response
       };
     } else {
       console.error('CellCast: API returned error', response);
       return {
         success: false,
-        error: response.message || response.error || response.msg || 'Failed to send SMS'
+        error: response.msg || response.meta?.status || 'Failed to send SMS'
       };
     }
   } catch (error) {
@@ -151,9 +152,12 @@ function makeRequest(method, endpoint, apiKey, body = null) {
       headers: {
         'APPKEY': apiKey,
         'Content-Type': 'application/json',
-        'Accept': 'application/json'
+        'Accept': 'application/json',
+        'User-Agent': 'SmileDesk/1.0'
       }
     };
+
+    console.log('CellCast: Making request to', url.href);
 
     const req = https.request(options, (res) => {
       let data = '';
