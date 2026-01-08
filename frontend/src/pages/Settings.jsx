@@ -366,10 +366,10 @@ export default function Settings() {
           {/* SMS Reply Number - shows configured or pending */}
           {settings.smsReplyNumber ? (
             <div className="p-4 rounded-lg bg-success-500/10 border border-success-500/20">
-              <p className="text-xs text-success-400 mb-1">Your SMS Number</p>
+              <p className="text-xs text-success-400 mb-1">SMS Number (Patients text this number)</p>
               <p className="text-2xl font-bold text-dark-100 tracking-wide">{settings.smsReplyNumber}</p>
               <p className="text-xs text-dark-400 mt-2">
-                Patients receive SMS from this number and reply here to book appointments
+                When you miss a call, patients receive an SMS from this number. They reply here to book.
               </p>
             </div>
           ) : (
@@ -389,7 +389,7 @@ export default function Settings() {
           </div>
 
           <div className="input-group">
-            <label className="input-label">Call Forwarding Number</label>
+            <label className="input-label">Your Phone Number</label>
             <input
               type="tel"
               value={settings.forwardingPhone || ''}
@@ -398,7 +398,7 @@ export default function Settings() {
               placeholder="+61414855294"
             />
             <p className="text-xs text-dark-500 mt-1">
-              Your mobile or office phone where calls should ring
+              Your mobile or office phone where we notify you of new bookings
             </p>
           </div>
 
