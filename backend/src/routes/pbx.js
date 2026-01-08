@@ -222,7 +222,7 @@ router.post('/missed-call', async (req, res) => {
       voicemail_duration,
       voicemailDuration,
       call_id,
-      callId
+      callId: externalCallIdAlt
     } = req.body;
 
     const webhookSecret = req.headers['x-webhook-secret'];
@@ -230,7 +230,7 @@ router.post('/missed-call', async (req, res) => {
     const calledNum = called_number || calledNumber || to;
     const hasVoicemail = voicemail_left || voicemailLeft || has_voicemail || false;
     const vmDuration = parseInt(voicemail_duration || voicemailDuration || 0);
-    const externalCallId = call_id || callId;
+    const externalCallId = call_id || externalCallIdAlt;
 
     if (!callerNum) {
       return res.status(400).json({ error: 'Missing caller phone number' });
