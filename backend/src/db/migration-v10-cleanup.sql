@@ -3,14 +3,19 @@
 -- Run this in Supabase SQL Editor
 
 -- =============================================
--- 1. DROP TWILIO COLUMNS (No longer needed)
+-- 1. DROP VIEW FIRST (depends on columns we're removing)
+-- =============================================
+DROP VIEW IF EXISTS v_admin_clients;
+
+-- =============================================
+-- 2. DROP TWILIO COLUMNS (No longer needed)
 -- =============================================
 ALTER TABLE settings DROP COLUMN IF EXISTS twilio_phone;
 ALTER TABLE settings DROP COLUMN IF EXISTS twilio_account_sid;
 ALTER TABLE settings DROP COLUMN IF EXISTS twilio_auth_token;
 
 -- =============================================
--- 2. DROP GOOGLE CALENDAR COLUMNS (Not using)
+-- 3. DROP GOOGLE CALENDAR COLUMNS (Not using)
 -- =============================================
 ALTER TABLE settings DROP COLUMN IF EXISTS google_calendar_connected;
 ALTER TABLE settings DROP COLUMN IF EXISTS google_tokens;
@@ -18,7 +23,7 @@ ALTER TABLE settings DROP COLUMN IF EXISTS google_client_id;
 ALTER TABLE settings DROP COLUMN IF EXISTS google_client_secret;
 
 -- =============================================
--- 3. DROP UNUSED COLUMNS
+-- 4. DROP UNUSED COLUMNS
 -- =============================================
 ALTER TABLE settings DROP COLUMN IF EXISTS cellcast_api_key;  -- Using global env var
 ALTER TABLE settings DROP COLUMN IF EXISTS pbx_webhook_secret; -- Not needed with CellCast
@@ -26,7 +31,7 @@ ALTER TABLE settings DROP COLUMN IF EXISTS pbx_type;          -- Not needed anym
 ALTER TABLE settings DROP COLUMN IF EXISTS business_phone;    -- Redundant with user.phone
 
 -- =============================================
--- 4. KEEP THESE COLUMNS:
+-- 5. KEEP THESE COLUMNS:
 -- =============================================
 -- sms_reply_number    - CellCast number for this dentist (YOU set this)
 -- forwarding_phone    - Where calls ring (dentist enters this)
@@ -42,9 +47,8 @@ ALTER TABLE settings DROP COLUMN IF EXISTS business_phone;    -- Redundant with 
 -- callback_offer
 
 -- =============================================
--- 5. UPDATE ADMIN CLIENTS VIEW
+-- 6. RECREATE ADMIN CLIENTS VIEW
 -- =============================================
-DROP VIEW IF EXISTS v_admin_clients;
 CREATE VIEW v_admin_clients AS
 SELECT
   u.id,
