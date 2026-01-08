@@ -48,22 +48,29 @@ async function sendSMS(apiKey, to, message, from = null) {
   }
 
   try {
+    console.log('CellCast: Sending SMS to', normalizedTo);
+    console.log('CellCast: Payload', JSON.stringify(payload));
+
     const response = await makeRequest('POST', '/send-sms', apiKey, payload);
 
-    if (response.success || response.status === 'success') {
+    console.log('CellCast: Response', JSON.stringify(response));
+
+    if (response.success || response.status === 'success' || response.data) {
       return {
         success: true,
-        messageId: response.message_id || response.id || 'sent',
+        messageId: response.message_id || response.id || response.data?.id || 'sent',
         response: response
       };
     } else {
+      console.error('CellCast: API returned error', response);
       return {
         success: false,
-        error: response.message || response.error || 'Failed to send SMS'
+        error: response.message || response.error || response.msg || 'Failed to send SMS'
       };
     }
   } catch (error) {
-    console.error('CellCast sendSMS error:', error);
+    console.error('CellCast sendSMS error:', error.message);
+    console.error('CellCast error details:', error);
     return {
       success: false,
       error: error.message || 'Failed to send SMS'

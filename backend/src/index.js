@@ -21,6 +21,9 @@ const smsRoutes = require('./routes/sms');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// Trust proxy for Render/Vercel (required for rate limiting behind reverse proxy)
+app.set('trust proxy', 1);
+
 // Middleware
 app.use(helmet({
   crossOriginResourcePolicy: { policy: "cross-origin" }
