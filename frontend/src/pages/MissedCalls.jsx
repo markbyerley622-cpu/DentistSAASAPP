@@ -4,7 +4,6 @@ import {
   Search,
   ChevronLeft,
   ChevronRight,
-  Phone,
   X,
   PhoneMissed,
   CheckCircle2,
@@ -236,22 +235,13 @@ function CallDetailModal({ call, onClose }) {
         </div>
 
         {/* Footer */}
-        <div className="flex gap-3 p-6 border-t border-dark-800/50 bg-dark-900/50">
+        <div className="p-6 border-t border-dark-800/50 bg-dark-900/50">
           <button
             onClick={onClose}
-            className="flex-1 px-4 py-3 rounded-xl bg-dark-800 hover:bg-dark-700 text-dark-200 font-medium transition-colors"
+            className="w-full px-4 py-3 rounded-xl bg-dark-800 hover:bg-dark-700 text-dark-200 font-medium transition-colors"
           >
             Close
           </button>
-          {(call.followupStatus === 'no_response' || call.followupStatus === 'pending') && (
-            <a
-              href={`tel:${call.callerPhone}`}
-              className="flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-gradient-to-r from-danger-500 to-danger-600 hover:from-danger-600 hover:to-danger-700 text-white font-semibold shadow-lg shadow-danger-500/25 transition-all"
-            >
-              <Phone className="w-4 h-4" />
-              Call Them
-            </a>
-          )}
         </div>
       </div>
     </div>
