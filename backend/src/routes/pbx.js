@@ -2,7 +2,7 @@
  * PBX Webhook Handler
  *
  * Receives missed call notifications from various VoIP/PBX systems and triggers
- * SMS follow-up via CellCast. The dentist's PBX handles calls and voicemails -
+ * SMS follow-up via ClickSend. The dentist's PBX handles calls and voicemails -
  * this system only sends SMS when a caller doesn't leave a voicemail.
  *
  * Supported PBX Systems:
@@ -27,8 +27,7 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const { query } = require('../db/config');
-const { decrypt } = require('../utils/crypto');
-const cellcast = require('../services/cellcast');
+const clicksend = require('../services/clicksend');
 
 const router = express.Router();
 
@@ -68,26 +67,27 @@ async function canSendSMS(userId, callerPhone) {
 async function sendMissedCallSMS(settings, callerPhone, callId = null) {
   const practiceName = settings.practice_name || 'our practice';
 
-  // Get CellCast API key
-  const apiKey = settings.cellcast_api_key ? decrypt(settings.cellcast_api_key) : process.env.CELLCAST_API_KEY;
+  // Get ClickSend credentials
+  const username = process.env.CLICKSEND_USERNAME;
+  const apiKey = process.env.CLICKSEND_API_KEY;
 
-  if (!apiKey) {
-    console.error('CellCast API key not configured for user:', settings.user_id);
+  if (!username || !apiKey) {
+    console.error('ClickSend credentials not configured for user:', settings.user_id);
     return { success: false, error: 'SMS not configured' };
   }
 
-  // Get the reply number (CellCast dedicated number)
-  const fromNumber = settings.sms_reply_number || process.env.CELLCAST_PHONE_NUMBER;
+  // Get the reply number (ClickSend dedicated number)
+  const fromNumber = settings.sms_reply_number || process.env.CLICKSEND_PHONE_NUMBER;
 
   // Get follow-up message
   const followUpMessage = settings.ai_greeting ||
     `Hi! This is ${practiceName}. We missed your call and want to make sure we help you. Reply 1 for us to call you back, or Reply 2 to schedule an appointment. Thanks!`;
 
   try {
-    const result = await cellcast.sendSMS(apiKey, callerPhone, followUpMessage, fromNumber);
+    const result = await clicksend.sendSMS(username, apiKey, callerPhone, followUpMessage, fromNumber);
 
     if (result.success) {
-      console.log(`SMS follow-up sent to ${callerPhone} via CellCast`);
+      console.log(`SMS follow-up sent to ${callerPhone} via ClickSend`);
 
       // Create conversation record
       const conversationResult = await query(
@@ -124,7 +124,7 @@ async function sendMissedCallSMS(settings, callerPhone, callId = null) {
 
       return { success: true, conversationId };
     } else {
-      console.error('Failed to send SMS via CellCast:', result.error);
+      console.error('Failed to send SMS via ClickSend:', result.error);
       return { success: false, error: result.error };
     }
   } catch (error) {
@@ -138,7 +138,7 @@ async function sendMissedCallSMS(settings, callerPhone, callId = null) {
  * The PBX forwards calls to our "virtual" number, which we track
  */
 async function findUserByForwardingPhone(forwardingPhone) {
-  const normalized = cellcast.normalizePhoneNumber(forwardingPhone);
+  const normalized = clicksend.normalizePhoneNumber(forwardingPhone);
 
   const result = await query(
     `SELECT s.*, u.id as user_id, u.practice_name, u.phone as user_phone
@@ -155,7 +155,7 @@ async function findUserByForwardingPhone(forwardingPhone) {
  * Find user by their business phone number
  */
 async function findUserByBusinessPhone(businessPhone) {
-  const normalized = cellcast.normalizePhoneNumber(businessPhone);
+  const normalized = clicksend.normalizePhoneNumber(businessPhone);
 
   const result = await query(
     `SELECT s.*, u.id as user_id, u.practice_name, u.phone as user_phone
@@ -260,14 +260,14 @@ router.post('/missed-call', async (req, res) => {
       await query(
         `INSERT INTO calls (user_id, caller_phone, status, is_missed, followup_status)
          VALUES ($1, $2, 'no-answer', true, 'completed')`,
-        [settings.user_id, cellcast.normalizePhoneNumber(callerNum)]
+        [settings.user_id, clicksend.normalizePhoneNumber(callerNum)]
       );
 
       return res.json({ status: 'ok', action: 'voicemail_left', sms_sent: false });
     }
 
     // No voicemail - check cooldown and send SMS
-    const normalizedCaller = cellcast.normalizePhoneNumber(callerNum);
+    const normalizedCaller = clicksend.normalizePhoneNumber(callerNum);
 
     if (!(await canSendSMS(settings.user_id, normalizedCaller))) {
       console.log(`SMS cooldown active for ${callerNum}`);
@@ -353,13 +353,13 @@ router.post('/missed-call/3cx', async (req, res) => {
       await query(
         `INSERT INTO calls (user_id, caller_phone, status, is_missed, followup_status)
          VALUES ($1, $2, 'no-answer', true, 'completed')`,
-        [settings.user_id, cellcast.normalizePhoneNumber(callerPhone)]
+        [settings.user_id, clicksend.normalizePhoneNumber(callerPhone)]
       );
       return res.json({ status: 'ok', action: 'voicemail_left', sms_sent: false });
     }
 
     // Send SMS
-    const normalizedCaller = cellcast.normalizePhoneNumber(callerPhone);
+    const normalizedCaller = clicksend.normalizePhoneNumber(callerPhone);
 
     if (!(await canSendSMS(settings.user_id, normalizedCaller))) {
       return res.json({ status: 'ok', action: 'cooldown_active', sms_sent: false });
@@ -434,7 +434,7 @@ router.post('/missed-call/ringcentral', async (req, res) => {
     }
 
     // RingCentral handles voicemail separately - if webhook fires, assume no voicemail
-    const normalizedCaller = cellcast.normalizePhoneNumber(callerPhone);
+    const normalizedCaller = clicksend.normalizePhoneNumber(callerPhone);
 
     if (!(await canSendSMS(settings.user_id, normalizedCaller))) {
       return res.json({ status: 'ok', action: 'cooldown_active', sms_sent: false });
@@ -501,7 +501,7 @@ router.post('/missed-call/vonage', async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    const normalizedCaller = cellcast.normalizePhoneNumber(callerPhone);
+    const normalizedCaller = clicksend.normalizePhoneNumber(callerPhone);
 
     if (!(await canSendSMS(settings.user_id, normalizedCaller))) {
       return res.json({ status: 'ok', action: 'cooldown_active', sms_sent: false });
@@ -562,7 +562,7 @@ router.post('/missed-call/freepbx', async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    const normalizedCaller = cellcast.normalizePhoneNumber(callerPhone);
+    const normalizedCaller = clicksend.normalizePhoneNumber(callerPhone);
 
     if (!(await canSendSMS(settings.user_id, normalizedCaller))) {
       return res.json({ status: 'ok', action: 'cooldown_active', sms_sent: false });
@@ -628,7 +628,7 @@ router.post('/missed-call/8x8', async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    const normalizedCaller = cellcast.normalizePhoneNumber(callerPhone);
+    const normalizedCaller = clicksend.normalizePhoneNumber(callerPhone);
 
     if (!(await canSendSMS(settings.user_id, normalizedCaller))) {
       return res.json({ status: 'ok', action: 'cooldown_active', sms_sent: false });
@@ -696,7 +696,7 @@ router.post('/missed-call/zoom', async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    const normalizedCaller = cellcast.normalizePhoneNumber(callerPhone);
+    const normalizedCaller = clicksend.normalizePhoneNumber(callerPhone);
 
     if (!(await canSendSMS(settings.user_id, normalizedCaller))) {
       return res.json({ status: 'ok', action: 'cooldown_active', sms_sent: false });
@@ -775,16 +775,16 @@ router.post('/test-missed-call', authenticate, async (req, res) => {
     const settings = settingsResult.rows[0];
     settings.user_id = userId;
 
-    // Check if CellCast is configured
-    if (!settings.cellcast_api_key && !process.env.CELLCAST_API_KEY) {
-      return res.status(400).json({ error: 'CellCast API key not configured' });
+    // Check if ClickSend is configured
+    if (!process.env.CLICKSEND_USERNAME || !process.env.CLICKSEND_API_KEY) {
+      return res.status(400).json({ error: 'ClickSend credentials not configured' });
     }
 
-    if (!settings.sms_reply_number && !process.env.CELLCAST_PHONE_NUMBER) {
+    if (!settings.sms_reply_number && !process.env.CLICKSEND_PHONE_NUMBER) {
       return res.status(400).json({ error: 'SMS reply number not configured' });
     }
 
-    const normalizedCaller = cellcast.normalizePhoneNumber(testPhone);
+    const normalizedCaller = clicksend.normalizePhoneNumber(testPhone);
 
     // Create a test call record
     const callResult = await query(
