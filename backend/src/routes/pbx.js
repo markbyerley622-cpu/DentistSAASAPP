@@ -1,52 +1,37 @@
 /**
- * PBX Webhook Handler
- *
- * Receives missed call notifications from various VoIP/PBX systems and triggers
- * SMS follow-up via Vonage. The dentist's PBX handles calls and voicemails -
- * this system only sends SMS when a caller doesn't leave a voicemail.
+ * PBX Routes - Multi-PBX Missed Call Webhooks
+ * Handles missed call notifications from various PBX systems
  *
  * Supported PBX Systems:
- * - 3CX (3cx.com)
- * - RingCentral (ringcentral.com)
- * - Vonage (vonage.com)
- * - FreePBX (freepbx.org)
- * - 8x8 (8x8.com)
- * - Zoom Phone (zoom.us)
- * - Generic/Custom webhooks
+ * - 3CX
+ * - RingCentral
+ * - Vonage (voice)
+ * - FreePBX/Asterisk
+ * - 8x8
+ * - Zoom Phone
+ * - Generic webhook
  *
- * Webhook Setup:
- * Configure your PBX to send a webhook when:
- * 1. Call is missed (no answer)
- * 2. Caller did NOT leave a voicemail (or voicemail < 3 seconds)
- *
- * URL: https://your-app.com/api/pbx/missed-call/{pbx-type}
- * Method: POST
- * Content-Type: application/json
+ * Security Features:
+ * - Rate limiting per IP
+ * - Phone number validation
+ * - Cooldown to prevent spam
  */
 
 const express = require('express');
-const rateLimit = require('express-rate-limit');
 const { query } = require('../db/config');
 const vonage = require('../services/vonage');
+const { pbx: log } = require('../utils/logger');
+const { withSMSRetry } = require('../utils/retry');
+const { captureException } = require('../utils/sentry');
+const { webhookIPLimiter } = require('../middleware/vonageWebhook');
 
 const router = express.Router();
 
-// Rate limiter to prevent webhook abuse
-const webhookLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
-  max: 100, // 100 webhooks per minute per IP
-  message: { error: 'Too many webhook requests' },
-  standardHeaders: true,
-  legacyHeaders: false
-});
-
-router.use(webhookLimiter);
-
-// SMS cooldown to prevent duplicate messages to the same caller
+// SMS cooldown in minutes - prevent spam to same number
 const SMS_COOLDOWN_MINUTES = 30;
 
 /**
- * Check if we can send SMS (cooldown check)
+ * Check if we can send SMS to this number (cooldown check)
  */
 async function canSendSMS(userId, callerPhone) {
   const result = await query(
@@ -54,7 +39,8 @@ async function canSendSMS(userId, callerPhone) {
      WHERE user_id = $1
        AND caller_phone = $2
        AND channel = 'sms'
-       AND created_at > NOW() - INTERVAL '1 minute' * $3
+       AND (last_sms_at > NOW() - INTERVAL '1 minute' * $3
+            OR created_at > NOW() - INTERVAL '1 minute' * $3)
      LIMIT 1`,
     [userId, callerPhone, SMS_COOLDOWN_MINUTES]
   );
@@ -62,106 +48,43 @@ async function canSendSMS(userId, callerPhone) {
 }
 
 /**
- * Send SMS follow-up for a missed call
+ * Find user by their phone number (forwarding_phone or sms_reply_number)
  */
-async function sendMissedCallSMS(settings, callerPhone, callId = null) {
-  const practiceName = settings.practice_name || 'our practice';
+async function findUserByPhone(phone) {
+  const normalized = vonage.normalizePhoneNumber(phone);
 
-  // Get Vonage credentials
-  const apiKey = process.env.VONAGE_API_KEY;
-  const apiSecret = process.env.VONAGE_API_SECRET;
-
-  if (!apiKey || !apiSecret) {
-    console.error('Vonage credentials not configured for user:', settings.user_id);
-    return { success: false, error: 'SMS not configured' };
-  }
-
-  // Get the reply number (Vonage dedicated number)
-  const fromNumber = settings.sms_reply_number || process.env.VONAGE_FROM_NUMBER;
-
-  // Get follow-up message
-  const followUpMessage = settings.ai_greeting ||
-    `Hi! This is ${practiceName}. We missed your call and want to make sure we help you. Reply 1 for us to call you back, or Reply 2 to schedule an appointment. Thanks!`;
-
-  try {
-    const result = await vonage.sendSMS(apiKey, apiSecret, callerPhone, followUpMessage, fromNumber);
-
-    if (result.success) {
-      console.log(`SMS follow-up sent to ${callerPhone} via Vonage`);
-
-      // Create conversation record
-      const conversationResult = await query(
-        `INSERT INTO conversations (user_id, call_id, caller_phone, channel, direction, status)
-         VALUES ($1, $2, $3, 'sms', 'outbound', 'active')
-         RETURNING id`,
-        [settings.user_id, callId, callerPhone]
-      );
-
-      const conversationId = conversationResult.rows[0].id;
-
-      // Store the outgoing message
-      await query(
-        `INSERT INTO messages (conversation_id, sender, content, message_type, delivered)
-         VALUES ($1, 'ai', $2, 'text', true)`,
-        [conversationId, followUpMessage]
-      );
-
-      // Update call with conversation link if we have a call ID
-      if (callId) {
-        await query(
-          `UPDATE calls SET conversation_id = $1, followup_status = 'in_progress', followup_attempts = 1, last_followup_at = NOW()
-           WHERE id = $2`,
-          [conversationId, callId]
-        );
-      }
-
-      // Create lead
-      await query(
-        `INSERT INTO leads (user_id, call_id, conversation_id, name, phone, status, source)
-         VALUES ($1, $2, $3, 'Unknown Caller', $4, 'new', 'missed_call')`,
-        [settings.user_id, callId, conversationId, callerPhone]
-      );
-
-      return { success: true, conversationId };
-    } else {
-      console.error('Failed to send SMS via Vonage:', result.error);
-      return { success: false, error: result.error };
-    }
-  } catch (error) {
-    console.error('SMS send error:', error);
-    return { success: false, error: error.message };
-  }
-}
-
-/**
- * Find user by forwarding phone number
- * The PBX forwards calls to our "virtual" number, which we track
- */
-async function findUserByForwardingPhone(forwardingPhone) {
-  const normalized = vonage.normalizePhoneNumber(forwardingPhone);
-
-  const result = await query(
-    `SELECT s.*, u.id as user_id, u.practice_name, u.phone as user_phone
+  // Try forwarding_phone first (most common)
+  let result = await query(
+    `SELECT s.*, u.id as user_id, u.practice_name
      FROM settings s
      JOIN users u ON s.user_id = u.id
      WHERE s.forwarding_phone = $1`,
     [normalized]
   );
 
-  return result.rows[0] || null;
-}
+  if (result.rows.length > 0) {
+    return result.rows[0];
+  }
 
-/**
- * Find user by their business phone number
- */
-async function findUserByBusinessPhone(businessPhone) {
-  const normalized = vonage.normalizePhoneNumber(businessPhone);
-
-  const result = await query(
-    `SELECT s.*, u.id as user_id, u.practice_name, u.phone as user_phone
+  // Try sms_reply_number
+  result = await query(
+    `SELECT s.*, u.id as user_id, u.practice_name
      FROM settings s
      JOIN users u ON s.user_id = u.id
-     WHERE u.phone = $1 OR s.business_phone = $1`,
+     WHERE s.sms_reply_number = $1`,
+    [normalized]
+  );
+
+  if (result.rows.length > 0) {
+    return result.rows[0];
+  }
+
+  // Try user's phone as last resort
+  result = await query(
+    `SELECT s.*, u.id as user_id, u.practice_name, u.phone
+     FROM settings s
+     JOIN users u ON s.user_id = u.id
+     WHERE u.phone = $1`,
     [normalized]
   );
 
@@ -169,594 +92,505 @@ async function findUserByBusinessPhone(businessPhone) {
 }
 
 /**
- * Find user by webhook secret (for authenticated webhooks)
+ * Process a missed call and send SMS follow-up
  */
-async function findUserByWebhookSecret(secret) {
-  if (!secret) return null;
+async function processMissedCall(userId, callerPhone, settings, callSid = null, hasVoicemail = false) {
+  const practiceName = settings.practice_name || 'Our Practice';
 
-  const result = await query(
-    `SELECT s.*, u.id as user_id, u.practice_name, u.phone as user_phone
-     FROM settings s
-     JOIN users u ON s.user_id = u.id
-     WHERE s.pbx_webhook_secret = $1`,
-    [secret]
-  );
+  log.info({
+    userId,
+    callerPhone,
+    hasVoicemail,
+    callSid
+  }, 'Processing missed call');
 
-  return result.rows[0] || null;
-}
-
-// =====================================================
-// GENERIC MISSED CALL WEBHOOK
-// =====================================================
-
-/**
- * Generic missed call webhook
- *
- * POST /api/pbx/missed-call
- *
- * Body:
- * {
- *   "caller_phone": "+61412345678",
- *   "called_number": "+61298765432",
- *   "voicemail_left": false,
- *   "voicemail_duration": 0,
- *   "call_id": "optional-unique-id",
- *   "timestamp": "2024-01-15T10:30:00Z"
- * }
- *
- * Headers:
- * - X-Webhook-Secret: your-webhook-secret (optional, for authentication)
- */
-router.post('/missed-call', async (req, res) => {
-  try {
-    const {
-      caller_phone,
-      callerPhone,
-      from,
-      called_number,
-      calledNumber,
-      to,
-      voicemail_left,
-      voicemailLeft,
-      has_voicemail,
-      voicemail_duration,
-      voicemailDuration,
-      call_id,
-      callId: externalCallIdAlt
-    } = req.body;
-
-    const webhookSecret = req.headers['x-webhook-secret'];
-    const callerNum = caller_phone || callerPhone || from;
-    const calledNum = called_number || calledNumber || to;
-    const hasVoicemail = voicemail_left || voicemailLeft || has_voicemail || false;
-    const vmDuration = parseInt(voicemail_duration || voicemailDuration || 0);
-    const externalCallId = call_id || externalCallIdAlt;
-
-    if (!callerNum) {
-      return res.status(400).json({ error: 'Missing caller phone number' });
-    }
-
-    console.log(`Missed call webhook: ${callerNum} -> ${calledNum}, voicemail: ${hasVoicemail}, duration: ${vmDuration}s`);
-
-    // Find the user - try webhook secret first, then by called number
-    let settings = await findUserByWebhookSecret(webhookSecret);
-    if (!settings && calledNum) {
-      settings = await findUserByBusinessPhone(calledNum);
-    }
-    if (!settings && calledNum) {
-      settings = await findUserByForwardingPhone(calledNum);
-    }
-
-    if (!settings) {
-      console.error('No user found for missed call webhook');
-      return res.status(404).json({ error: 'User not found for this phone number' });
-    }
-
-    // Check if voicemail was left (>= 3 seconds = voicemail, skip SMS)
-    if (hasVoicemail || vmDuration >= 3) {
-      console.log(`Voicemail left (${vmDuration}s), NOT sending SMS`);
-
-      // Still log the call
-      await query(
-        `INSERT INTO calls (user_id, caller_phone, status, is_missed, followup_status)
-         VALUES ($1, $2, 'no-answer', true, 'completed')`,
-        [settings.user_id, vonage.normalizePhoneNumber(callerNum)]
-      );
-
-      return res.json({ status: 'ok', action: 'voicemail_left', sms_sent: false });
-    }
-
-    // No voicemail - check cooldown and send SMS
-    const normalizedCaller = vonage.normalizePhoneNumber(callerNum);
-
-    if (!(await canSendSMS(settings.user_id, normalizedCaller))) {
-      console.log(`SMS cooldown active for ${callerNum}`);
-      return res.json({ status: 'ok', action: 'cooldown_active', sms_sent: false });
-    }
-
-    // Create call record
-    const callResult = await query(
-      `INSERT INTO calls (user_id, caller_phone, status, is_missed, followup_status)
-       VALUES ($1, $2, 'no-answer', true, 'pending')
-       RETURNING id`,
-      [settings.user_id, normalizedCaller]
+  // If voicemail was left, don't send SMS (dentist will handle)
+  if (hasVoicemail) {
+    // Still record the call
+    await query(
+      `INSERT INTO calls (user_id, twilio_call_sid, caller_phone, status, is_missed, followup_status)
+       VALUES ($1, $2, $3, 'no-answer', true, 'completed')`,
+      [userId, callSid, callerPhone]
     );
 
-    const callId = callResult.rows[0].id;
+    log.info({ callerPhone }, 'Voicemail left, skipping SMS');
+    return { smsSent: false, reason: 'voicemail_left' };
+  }
 
-    // Send SMS follow-up
-    const smsResult = await sendMissedCallSMS(settings, normalizedCaller, callId);
+  // Check cooldown
+  const canSend = await canSendSMS(userId, callerPhone);
+  if (!canSend) {
+    log.info({ callerPhone }, 'SMS cooldown active, skipping');
+    return { smsSent: false, reason: 'cooldown' };
+  }
 
-    if (smsResult.success) {
-      return res.json({ status: 'ok', action: 'sms_sent', sms_sent: true });
+  // Create call record
+  const callResult = await query(
+    `INSERT INTO calls (user_id, twilio_call_sid, caller_phone, status, is_missed, followup_status)
+     VALUES ($1, $2, $3, 'no-answer', true, 'pending')
+     RETURNING id`,
+    [userId, callSid, callerPhone]
+  );
+
+  const callId = callResult.rows[0].id;
+
+  // Create conversation
+  const conversationResult = await query(
+    `INSERT INTO conversations (user_id, call_id, caller_phone, channel, direction, status, last_activity_at)
+     VALUES ($1, $2, $3, 'sms', 'outbound', 'awaiting_initial_choice', NOW())
+     RETURNING id`,
+    [userId, callId, callerPhone]
+  );
+
+  const conversationId = conversationResult.rows[0].id;
+
+  // Create lead
+  await query(
+    `INSERT INTO leads (user_id, call_id, conversation_id, name, phone, status, source)
+     VALUES ($1, $2, $3, 'Unknown Caller', $4, 'new', 'missed_call')`,
+    [userId, callId, conversationId, callerPhone]
+  );
+
+  // Get SMS message
+  const followUpMessage = settings.ai_greeting ||
+    `Hi! This is ${practiceName}. We missed your call and want to help you.\n\nReply:\n1 - Request a callback\n2 - Book an appointment`;
+
+  // Send SMS with retry
+  const fromNumber = settings.sms_reply_number || process.env.VONAGE_FROM_NUMBER;
+
+  if (!fromNumber) {
+    log.error({ userId }, 'No SMS reply number configured');
+    await query(
+      `UPDATE calls SET followup_status = 'failed' WHERE id = $1`,
+      [callId]
+    );
+    return { smsSent: false, reason: 'no_from_number' };
+  }
+
+  try {
+    const sendResult = await withSMSRetry(
+      () => vonage.sendSMS(
+        process.env.VONAGE_API_KEY,
+        process.env.VONAGE_API_SECRET,
+        callerPhone,
+        followUpMessage,
+        fromNumber
+      ),
+      { context: `missed-call-followup-${callId}` }
+    );
+
+    if (sendResult.success) {
+      // Store outbound message
+      await query(
+        `INSERT INTO messages (conversation_id, sender, content, message_type, external_message_id, delivery_status, provider)
+         VALUES ($1, 'ai', $2, 'text', $3, 'sent', 'vonage')`,
+        [conversationId, followUpMessage, sendResult.messageId]
+      );
+
+      // Update call status
+      await query(
+        `UPDATE calls
+         SET conversation_id = $1, followup_status = 'in_progress', followup_attempts = 1, last_followup_at = NOW()
+         WHERE id = $2`,
+        [conversationId, callId]
+      );
+
+      // Update conversation
+      await query(
+        `UPDATE conversations SET last_sms_at = NOW() WHERE id = $1`,
+        [conversationId]
+      );
+
+      log.info({ callId, conversationId, callerPhone }, 'SMS follow-up sent');
+      return { smsSent: true, callId, conversationId };
     } else {
       await query(
         `UPDATE calls SET followup_status = 'failed' WHERE id = $1`,
         [callId]
       );
-      return res.status(500).json({ error: 'Failed to send SMS', details: smsResult.error });
+      log.error({ callId, error: sendResult.error }, 'SMS send failed');
+      return { smsSent: false, reason: 'send_failed', error: sendResult.error };
     }
   } catch (error) {
-    console.error('Missed call webhook error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    await query(
+      `UPDATE calls SET followup_status = 'failed' WHERE id = $1`,
+      [callId]
+    );
+    log.error({ callId, error: error.message }, 'SMS send error');
+    captureException(error, { context: 'missed_call_sms', callId });
+    return { smsSent: false, reason: 'error', error: error.message };
+  }
+}
+
+/**
+ * Generic missed call webhook
+ * POST /api/pbx/missed-call
+ */
+router.post('/missed-call', webhookIPLimiter, async (req, res) => {
+  try {
+    const { callerPhone, calledPhone, callSid, hasVoicemail } = req.body;
+
+    log.info({ callerPhone, calledPhone, callSid }, 'Generic missed call webhook');
+
+    if (!callerPhone) {
+      return res.status(400).json({ error: 'callerPhone is required' });
+    }
+
+    // Find user by the called number
+    const settings = await findUserByPhone(calledPhone || callerPhone);
+
+    if (!settings) {
+      log.warn({ calledPhone, callerPhone }, 'No user found for phone number');
+      return res.json({ status: 'ok', action: 'no_user_found' });
+    }
+
+    const result = await processMissedCall(
+      settings.user_id,
+      vonage.normalizePhoneNumber(callerPhone),
+      settings,
+      callSid,
+      hasVoicemail === true || hasVoicemail === 'true'
+    );
+
+    return res.json({ status: 'ok', ...result });
+  } catch (error) {
+    log.error({ error: error.message }, 'Generic missed call error');
+    captureException(error, { context: 'pbx_generic_webhook' });
+    return res.status(500).json({ error: 'Internal error' });
   }
 });
-
-// =====================================================
-// 3CX WEBHOOK
-// =====================================================
 
 /**
  * 3CX missed call webhook
- *
- * 3CX sends webhooks with format:
- * {
- *   "event": "call.missed" or "call.completed",
- *   "call": {
- *     "id": "call-id",
- *     "from": "+61412345678",
- *     "to": "+61298765432",
- *     "duration": 0,
- *     "status": "missed"
- *   }
- * }
+ * POST /api/pbx/missed-call/3cx
  */
-router.post('/missed-call/3cx', async (req, res) => {
+router.post('/missed-call/3cx', webhookIPLimiter, async (req, res) => {
   try {
-    const { event, call } = req.body;
+    // 3CX webhook format
+    const {
+      callernumber,
+      callednumber,
+      callid,
+      dn,
+      event,
+      status
+    } = req.body;
 
-    // Only handle missed calls
-    if (event !== 'call.missed' && call?.status !== 'missed') {
-      return res.json({ status: 'ok', action: 'ignored' });
-    }
+    const callerPhone = callernumber || req.body.CallerNumber;
+    const calledPhone = callednumber || dn || req.body.CalledNumber;
 
-    const callerPhone = call?.from || req.body.from;
-    const calledNumber = call?.to || req.body.to;
-    const voicemailDuration = call?.voicemail_duration || 0;
+    log.info({
+      callerPhone,
+      calledPhone,
+      event,
+      status,
+      source: '3cx'
+    }, '3CX missed call webhook');
 
     if (!callerPhone) {
-      return res.status(400).json({ error: 'Missing caller phone' });
+      return res.status(400).json({ error: 'Caller number required' });
     }
 
-    // Find user
-    let settings = await findUserByBusinessPhone(calledNumber);
-    if (!settings) {
-      settings = await findUserByForwardingPhone(calledNumber);
-    }
+    // 3CX events: Ringing, Connected, Terminated
+    // Only process if the call was missed (no answer)
+    if (event === 'Terminated' && status !== 'Answered') {
+      const settings = await findUserByPhone(calledPhone);
 
-    if (!settings) {
-      return res.status(404).json({ error: 'User not found' });
-    }
+      if (!settings) {
+        return res.json({ status: 'ok', action: 'no_user_found' });
+      }
 
-    // Check for voicemail
-    if (voicemailDuration >= 3) {
-      await query(
-        `INSERT INTO calls (user_id, caller_phone, status, is_missed, followup_status)
-         VALUES ($1, $2, 'no-answer', true, 'completed')`,
-        [settings.user_id, vonage.normalizePhoneNumber(callerPhone)]
+      const result = await processMissedCall(
+        settings.user_id,
+        vonage.normalizePhoneNumber(callerPhone),
+        settings,
+        callid
       );
-      return res.json({ status: 'ok', action: 'voicemail_left', sms_sent: false });
+
+      return res.json({ status: 'ok', ...result });
     }
 
-    // Send SMS
-    const normalizedCaller = vonage.normalizePhoneNumber(callerPhone);
-
-    if (!(await canSendSMS(settings.user_id, normalizedCaller))) {
-      return res.json({ status: 'ok', action: 'cooldown_active', sms_sent: false });
-    }
-
-    const callResult = await query(
-      `INSERT INTO calls (user_id, caller_phone, status, is_missed, followup_status)
-       VALUES ($1, $2, 'no-answer', true, 'pending')
-       RETURNING id`,
-      [settings.user_id, normalizedCaller]
-    );
-
-    const smsResult = await sendMissedCallSMS(settings, normalizedCaller, callResult.rows[0].id);
-    res.json({ status: 'ok', action: 'sms_sent', sms_sent: smsResult.success });
+    return res.json({ status: 'ok', action: 'event_ignored' });
   } catch (error) {
-    console.error('3CX webhook error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    log.error({ error: error.message }, '3CX webhook error');
+    captureException(error, { context: 'pbx_3cx_webhook' });
+    return res.status(500).json({ error: 'Internal error' });
   }
 });
-
-// =====================================================
-// RINGCENTRAL WEBHOOK
-// =====================================================
 
 /**
  * RingCentral missed call webhook
- *
- * RingCentral format:
- * {
- *   "uuid": "event-id",
- *   "event": "/restapi/v1.0/account/~/extension/~/presence/line",
- *   "body": {
- *     "telephonyStatus": "NoCall",
- *     "activeCalls": [{
- *       "direction": "Inbound",
- *       "from": "+61412345678",
- *       "to": "+61298765432",
- *       "telephonyStatus": "NoCall",
- *       "terminationType": "missed"
- *     }]
- *   }
- * }
+ * POST /api/pbx/missed-call/ringcentral
  */
-router.post('/missed-call/ringcentral', async (req, res) => {
+router.post('/missed-call/ringcentral', webhookIPLimiter, async (req, res) => {
   try {
+    // RingCentral webhook format
     const { body: eventBody } = req.body;
-    const activeCalls = eventBody?.activeCalls || [];
+    const data = eventBody || req.body;
 
-    // Find missed call
-    const missedCall = activeCalls.find(c =>
-      c.terminationType === 'missed' || c.result === 'Missed'
-    );
+    const callerPhone = data.from?.phoneNumber || data.callerNumber;
+    const calledPhone = data.to?.phoneNumber || data.calledNumber;
+    const result = data.result || data.callResult;
 
-    if (!missedCall) {
-      return res.json({ status: 'ok', action: 'ignored' });
-    }
-
-    const callerPhone = missedCall.from;
-    const calledNumber = missedCall.to;
+    log.info({
+      callerPhone,
+      calledPhone,
+      result,
+      source: 'ringcentral'
+    }, 'RingCentral webhook');
 
     if (!callerPhone) {
-      return res.status(400).json({ error: 'Missing caller phone' });
+      return res.status(400).json({ error: 'Caller number required' });
     }
 
-    let settings = await findUserByBusinessPhone(calledNumber);
-    if (!settings) {
-      settings = await findUserByForwardingPhone(calledNumber);
+    // RingCentral results: Missed, Voicemail, Accepted, etc.
+    if (result === 'Missed' || result === 'No Answer') {
+      const settings = await findUserByPhone(calledPhone);
+
+      if (!settings) {
+        return res.json({ status: 'ok', action: 'no_user_found' });
+      }
+
+      const processResult = await processMissedCall(
+        settings.user_id,
+        vonage.normalizePhoneNumber(callerPhone),
+        settings,
+        data.id || data.sessionId,
+        result === 'Voicemail'
+      );
+
+      return res.json({ status: 'ok', ...processResult });
     }
 
-    if (!settings) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    // RingCentral handles voicemail separately - if webhook fires, assume no voicemail
-    const normalizedCaller = vonage.normalizePhoneNumber(callerPhone);
-
-    if (!(await canSendSMS(settings.user_id, normalizedCaller))) {
-      return res.json({ status: 'ok', action: 'cooldown_active', sms_sent: false });
-    }
-
-    const callResult = await query(
-      `INSERT INTO calls (user_id, caller_phone, status, is_missed, followup_status)
-       VALUES ($1, $2, 'no-answer', true, 'pending')
-       RETURNING id`,
-      [settings.user_id, normalizedCaller]
-    );
-
-    const smsResult = await sendMissedCallSMS(settings, normalizedCaller, callResult.rows[0].id);
-    res.json({ status: 'ok', action: 'sms_sent', sms_sent: smsResult.success });
+    return res.json({ status: 'ok', action: 'event_ignored' });
   } catch (error) {
-    console.error('RingCentral webhook error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    log.error({ error: error.message }, 'RingCentral webhook error');
+    captureException(error, { context: 'pbx_ringcentral_webhook' });
+    return res.status(500).json({ error: 'Internal error' });
   }
 });
-
-// =====================================================
-// VONAGE WEBHOOK
-// =====================================================
 
 /**
- * Vonage missed call webhook
- *
- * Vonage format:
- * {
- *   "conversation_uuid": "conv-id",
- *   "type": "call",
- *   "status": "unanswered",
- *   "from": "+61412345678",
- *   "to": "+61298765432",
- *   "duration": "0"
- * }
+ * Vonage Voice missed call webhook
+ * POST /api/pbx/missed-call/vonage
  */
-router.post('/missed-call/vonage', async (req, res) => {
+router.post('/missed-call/vonage', webhookIPLimiter, async (req, res) => {
   try {
-    const { status, from, to, direction } = req.body;
+    // Vonage Voice webhook format
+    const {
+      from,
+      to,
+      uuid,
+      status,
+      direction
+    } = req.body;
 
-    // Only handle unanswered/missed inbound calls
-    if (status !== 'unanswered' && status !== 'rejected' && status !== 'timeout') {
-      return res.json({ status: 'ok', action: 'ignored' });
+    log.info({
+      from,
+      to,
+      status,
+      direction,
+      source: 'vonage'
+    }, 'Vonage voice webhook');
+
+    if (!from) {
+      return res.status(400).json({ error: 'From number required' });
     }
 
-    if (direction && direction !== 'inbound') {
-      return res.json({ status: 'ok', action: 'ignored' });
+    // Vonage statuses: started, ringing, answered, completed, busy, cancelled, timeout, failed, rejected
+    if (['timeout', 'cancelled', 'busy', 'rejected', 'unanswered'].includes(status)) {
+      const settings = await findUserByPhone(to);
+
+      if (!settings) {
+        return res.json({ status: 'ok', action: 'no_user_found' });
+      }
+
+      const result = await processMissedCall(
+        settings.user_id,
+        vonage.normalizePhoneNumber(from),
+        settings,
+        uuid
+      );
+
+      return res.json({ status: 'ok', ...result });
     }
 
-    const callerPhone = from;
-    const calledNumber = to;
-
-    if (!callerPhone) {
-      return res.status(400).json({ error: 'Missing caller phone' });
-    }
-
-    let settings = await findUserByBusinessPhone(calledNumber);
-    if (!settings) {
-      settings = await findUserByForwardingPhone(calledNumber);
-    }
-
-    if (!settings) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    const normalizedCaller = vonage.normalizePhoneNumber(callerPhone);
-
-    if (!(await canSendSMS(settings.user_id, normalizedCaller))) {
-      return res.json({ status: 'ok', action: 'cooldown_active', sms_sent: false });
-    }
-
-    const callResult = await query(
-      `INSERT INTO calls (user_id, caller_phone, status, is_missed, followup_status)
-       VALUES ($1, $2, 'no-answer', true, 'pending')
-       RETURNING id`,
-      [settings.user_id, normalizedCaller]
-    );
-
-    const smsResult = await sendMissedCallSMS(settings, normalizedCaller, callResult.rows[0].id);
-    res.json({ status: 'ok', action: 'sms_sent', sms_sent: smsResult.success });
+    return res.json({ status: 'ok', action: 'event_ignored' });
   } catch (error) {
-    console.error('Vonage webhook error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    log.error({ error: error.message }, 'Vonage voice webhook error');
+    captureException(error, { context: 'pbx_vonage_webhook' });
+    return res.status(500).json({ error: 'Internal error' });
   }
 });
-
-// =====================================================
-// FREEPBX / ASTERISK WEBHOOK
-// =====================================================
 
 /**
  * FreePBX/Asterisk missed call webhook
- *
- * Typically custom webhook configured via dialplan AGI:
- * {
- *   "event": "missed_call",
- *   "callerid": "+61412345678",
- *   "extension": "100",
- *   "did": "+61298765432",
- *   "timestamp": "2024-01-15 10:30:00"
- * }
+ * POST /api/pbx/missed-call/freepbx
  */
-router.post('/missed-call/freepbx', async (req, res) => {
+router.post('/missed-call/freepbx', webhookIPLimiter, async (req, res) => {
   try {
-    const { event, callerid, callerIdNum, from, did, extension, to } = req.body;
+    // FreePBX/Asterisk AGI format
+    const {
+      callerid,
+      calleridnum,
+      dnid,
+      extension,
+      uniqueid,
+      disposition
+    } = req.body;
 
-    if (event && event !== 'missed_call' && event !== 'noanswer') {
-      return res.json({ status: 'ok', action: 'ignored' });
-    }
+    const callerPhone = calleridnum || callerid;
+    const calledPhone = dnid || extension;
 
-    const callerPhone = callerid || callerIdNum || from;
-    const calledNumber = did || to;
+    log.info({
+      callerPhone,
+      calledPhone,
+      disposition,
+      source: 'freepbx'
+    }, 'FreePBX webhook');
 
     if (!callerPhone) {
-      return res.status(400).json({ error: 'Missing caller phone' });
+      return res.status(400).json({ error: 'Caller number required' });
     }
 
-    let settings = await findUserByBusinessPhone(calledNumber);
-    if (!settings) {
-      settings = await findUserByForwardingPhone(calledNumber);
+    // Asterisk dispositions: ANSWERED, NO ANSWER, BUSY, FAILED
+    if (['NO ANSWER', 'BUSY', 'FAILED', 'NOANSWER'].includes(disposition?.toUpperCase())) {
+      const settings = await findUserByPhone(calledPhone);
+
+      if (!settings) {
+        return res.json({ status: 'ok', action: 'no_user_found' });
+      }
+
+      const result = await processMissedCall(
+        settings.user_id,
+        vonage.normalizePhoneNumber(callerPhone),
+        settings,
+        uniqueid
+      );
+
+      return res.json({ status: 'ok', ...result });
     }
 
-    if (!settings) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    const normalizedCaller = vonage.normalizePhoneNumber(callerPhone);
-
-    if (!(await canSendSMS(settings.user_id, normalizedCaller))) {
-      return res.json({ status: 'ok', action: 'cooldown_active', sms_sent: false });
-    }
-
-    const callResult = await query(
-      `INSERT INTO calls (user_id, caller_phone, status, is_missed, followup_status)
-       VALUES ($1, $2, 'no-answer', true, 'pending')
-       RETURNING id`,
-      [settings.user_id, normalizedCaller]
-    );
-
-    const smsResult = await sendMissedCallSMS(settings, normalizedCaller, callResult.rows[0].id);
-    res.json({ status: 'ok', action: 'sms_sent', sms_sent: smsResult.success });
+    return res.json({ status: 'ok', action: 'event_ignored' });
   } catch (error) {
-    console.error('FreePBX webhook error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    log.error({ error: error.message }, 'FreePBX webhook error');
+    captureException(error, { context: 'pbx_freepbx_webhook' });
+    return res.status(500).json({ error: 'Internal error' });
   }
 });
-
-// =====================================================
-// 8x8 WEBHOOK
-// =====================================================
 
 /**
  * 8x8 missed call webhook
- *
- * 8x8 format:
- * {
- *   "eventType": "call.ended",
- *   "call": {
- *     "callId": "call-id",
- *     "direction": "inbound",
- *     "from": "+61412345678",
- *     "to": "+61298765432",
- *     "status": "missed",
- *     "duration": 0
- *   }
- * }
+ * POST /api/pbx/missed-call/8x8
  */
-router.post('/missed-call/8x8', async (req, res) => {
+router.post('/missed-call/8x8', webhookIPLimiter, async (req, res) => {
   try {
-    const { eventType, call } = req.body;
+    const {
+      caller_id,
+      called_number,
+      call_id,
+      call_result,
+      call_status
+    } = req.body;
 
-    // Check for missed call
-    if (call?.status !== 'missed' && call?.status !== 'no-answer' && call?.reason !== 'no_answer') {
-      return res.json({ status: 'ok', action: 'ignored' });
+    log.info({
+      caller_id,
+      called_number,
+      call_result,
+      source: '8x8'
+    }, '8x8 webhook');
+
+    if (!caller_id) {
+      return res.status(400).json({ error: 'Caller ID required' });
     }
 
-    const callerPhone = call?.from || req.body.from;
-    const calledNumber = call?.to || req.body.to;
+    if (call_result === 'missed' || call_status === 'no_answer') {
+      const settings = await findUserByPhone(called_number);
 
-    if (!callerPhone) {
-      return res.status(400).json({ error: 'Missing caller phone' });
+      if (!settings) {
+        return res.json({ status: 'ok', action: 'no_user_found' });
+      }
+
+      const result = await processMissedCall(
+        settings.user_id,
+        vonage.normalizePhoneNumber(caller_id),
+        settings,
+        call_id
+      );
+
+      return res.json({ status: 'ok', ...result });
     }
 
-    let settings = await findUserByBusinessPhone(calledNumber);
-    if (!settings) {
-      settings = await findUserByForwardingPhone(calledNumber);
-    }
-
-    if (!settings) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    const normalizedCaller = vonage.normalizePhoneNumber(callerPhone);
-
-    if (!(await canSendSMS(settings.user_id, normalizedCaller))) {
-      return res.json({ status: 'ok', action: 'cooldown_active', sms_sent: false });
-    }
-
-    const callResult = await query(
-      `INSERT INTO calls (user_id, caller_phone, status, is_missed, followup_status)
-       VALUES ($1, $2, 'no-answer', true, 'pending')
-       RETURNING id`,
-      [settings.user_id, normalizedCaller]
-    );
-
-    const smsResult = await sendMissedCallSMS(settings, normalizedCaller, callResult.rows[0].id);
-    res.json({ status: 'ok', action: 'sms_sent', sms_sent: smsResult.success });
+    return res.json({ status: 'ok', action: 'event_ignored' });
   } catch (error) {
-    console.error('8x8 webhook error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    log.error({ error: error.message }, '8x8 webhook error');
+    captureException(error, { context: 'pbx_8x8_webhook' });
+    return res.status(500).json({ error: 'Internal error' });
   }
 });
-
-// =====================================================
-// ZOOM PHONE WEBHOOK
-// =====================================================
 
 /**
  * Zoom Phone missed call webhook
- *
- * Zoom Phone format:
- * {
- *   "event": "phone.call_ended",
- *   "payload": {
- *     "object": {
- *       "call_id": "call-id",
- *       "direction": "inbound",
- *       "caller_number": "+61412345678",
- *       "callee_number": "+61298765432",
- *       "result": "missed"
- *     }
- *   }
- * }
+ * POST /api/pbx/missed-call/zoom
  */
-router.post('/missed-call/zoom', async (req, res) => {
+router.post('/missed-call/zoom', webhookIPLimiter, async (req, res) => {
   try {
-    const { event, payload } = req.body;
-    const callData = payload?.object;
+    const { payload, event } = req.body;
+    const data = payload?.object || req.body;
 
-    // Check for missed call
-    if (callData?.result !== 'missed' && callData?.result !== 'no_answer') {
-      return res.json({ status: 'ok', action: 'ignored' });
-    }
+    const callerPhone = data.caller_number || data.from;
+    const calledPhone = data.callee_number || data.to;
 
-    const callerPhone = callData?.caller_number || callData?.from;
-    const calledNumber = callData?.callee_number || callData?.to;
+    log.info({
+      callerPhone,
+      calledPhone,
+      event,
+      source: 'zoom'
+    }, 'Zoom webhook');
 
     if (!callerPhone) {
-      return res.status(400).json({ error: 'Missing caller phone' });
+      return res.status(400).json({ error: 'Caller number required' });
     }
 
-    let settings = await findUserByBusinessPhone(calledNumber);
-    if (!settings) {
-      settings = await findUserByForwardingPhone(calledNumber);
+    // Zoom events: phone.callee_missed, phone.callee_rejected
+    if (event === 'phone.callee_missed' || data.result === 'missed') {
+      const settings = await findUserByPhone(calledPhone);
+
+      if (!settings) {
+        return res.json({ status: 'ok', action: 'no_user_found' });
+      }
+
+      const result = await processMissedCall(
+        settings.user_id,
+        vonage.normalizePhoneNumber(callerPhone),
+        settings,
+        data.call_id
+      );
+
+      return res.json({ status: 'ok', ...result });
     }
 
-    if (!settings) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    const normalizedCaller = vonage.normalizePhoneNumber(callerPhone);
-
-    if (!(await canSendSMS(settings.user_id, normalizedCaller))) {
-      return res.json({ status: 'ok', action: 'cooldown_active', sms_sent: false });
-    }
-
-    const callResult = await query(
-      `INSERT INTO calls (user_id, caller_phone, status, is_missed, followup_status)
-       VALUES ($1, $2, 'no-answer', true, 'pending')
-       RETURNING id`,
-      [settings.user_id, normalizedCaller]
-    );
-
-    const smsResult = await sendMissedCallSMS(settings, normalizedCaller, callResult.rows[0].id);
-    res.json({ status: 'ok', action: 'sms_sent', sms_sent: smsResult.success });
+    return res.json({ status: 'ok', action: 'event_ignored' });
   } catch (error) {
-    console.error('Zoom Phone webhook error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    log.error({ error: error.message }, 'Zoom webhook error');
+    captureException(error, { context: 'pbx_zoom_webhook' });
+    return res.status(500).json({ error: 'Internal error' });
   }
 });
 
-// =====================================================
-// HEALTH CHECK
-// =====================================================
-
 /**
- * Health check endpoint for PBX webhooks
+ * Test missed call endpoint (requires auth)
+ * POST /api/pbx/test-missed-call
  */
-router.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    service: 'pbx-webhooks',
-    supported: ['3cx', 'ringcentral', 'vonage', 'freepbx', '8x8', 'zoom', 'generic'],
-    timestamp: new Date().toISOString()
-  });
-});
-
-// =====================================================
-// TEST ENDPOINT (for testing without a PBX)
-// =====================================================
-
 const { authenticate } = require('../middleware/auth');
 
-/**
- * Test missed call SMS - simulates a missed call to test the flow
- *
- * POST /api/pbx/test-missed-call
- * Requires authentication
- *
- * Body:
- * {
- *   "testPhone": "+61412345678"  // Your phone number to receive the test SMS
- * }
- */
 router.post('/test-missed-call', authenticate, async (req, res) => {
   try {
-    const userId = req.user.id;
     const { testPhone } = req.body;
+    const userId = req.user.id;
 
     if (!testPhone) {
-      return res.status(400).json({ error: 'Test phone number is required' });
+      return res.status(400).json({ error: { message: 'testPhone is required' } });
     }
 
     // Get user's settings
@@ -769,59 +603,40 @@ router.post('/test-missed-call', authenticate, async (req, res) => {
     );
 
     if (settingsResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Settings not found' });
+      return res.status(400).json({ error: { message: 'Settings not configured' } });
     }
 
     const settings = settingsResult.rows[0];
     settings.user_id = userId;
 
-    // Check if Vonage is configured
-    if (!process.env.VONAGE_API_KEY || !process.env.VONAGE_API_SECRET) {
-      return res.status(400).json({ error: 'Vonage credentials not configured' });
-    }
-
-    if (!settings.sms_reply_number && !process.env.VONAGE_FROM_NUMBER) {
-      return res.status(400).json({ error: 'SMS reply number not configured' });
-    }
-
-    const normalizedCaller = vonage.normalizePhoneNumber(testPhone);
-
-    // Create a test call record
-    const callResult = await query(
-      `INSERT INTO calls (user_id, caller_phone, status, is_missed, followup_status)
-       VALUES ($1, $2, 'no-answer', true, 'pending')
-       RETURNING id`,
-      [userId, normalizedCaller]
+    // Process as missed call (skip voicemail)
+    const result = await processMissedCall(
+      userId,
+      vonage.normalizePhoneNumber(testPhone),
+      settings,
+      `test-${Date.now()}`,
+      false
     );
 
-    const callId = callResult.rows[0].id;
-
-    // Send the SMS
-    const smsResult = await sendMissedCallSMS(settings, normalizedCaller, callId);
-
-    if (smsResult.success) {
-      res.json({
-        success: true,
-        message: `Test SMS sent to ${testPhone}`,
-        callId: callId,
-        conversationId: smsResult.conversationId
-      });
-    } else {
-      // Mark call as failed
-      await query(
-        `UPDATE calls SET followup_status = 'failed' WHERE id = $1`,
-        [callId]
-      );
-
-      res.status(500).json({
-        success: false,
-        error: smsResult.error || 'Failed to send test SMS'
-      });
-    }
+    return res.json({
+      success: result.smsSent,
+      ...result
+    });
   } catch (error) {
-    console.error('Test missed call error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    log.error({ error: error.message }, 'Test missed call error');
+    return res.status(500).json({ error: { message: 'Test failed' } });
   }
+});
+
+/**
+ * Health check
+ */
+router.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'pbx-webhooks',
+    supportedSystems: ['generic', '3cx', 'ringcentral', 'vonage', 'freepbx', '8x8', 'zoom']
+  });
 });
 
 module.exports = router;

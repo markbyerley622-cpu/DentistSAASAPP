@@ -1,789 +1,736 @@
 /**
- * SMS Webhook Handler - Numeric-Only Conversational Flow
+ * SMS Routes - Vonage Two-Way SMS Integration
+ * Handles inbound SMS webhooks and conversational booking flow
  *
- * Handles inbound SMS messages from Vonage with a streamlined numeric-only UX.
- * Patients never need to type words - just reply with numbers (1, 2, 3, 4).
+ * Security Features:
+ * - Signature validation (HMAC-SHA256)
+ * - Per-phone rate limiting
+ * - Idempotency protection
+ * - Input sanitization
  *
- * Webhook URL: https://your-app.com/api/sms/incoming
- * Configure this URL in your Vonage dashboard under:
- * Numbers > Your Number > Inbound Webhook URL
- *
- * FLOW STATES:
- * - awaiting_initial_choice: Reply 1 (book) or 2 (callback)
- * - awaiting_slot_confirmation: Reply 1 (confirm) or 2 (see more)
- * - awaiting_slot_selection: Reply 1, 2, 3 (select slot) or 4 (more options)
- * - callback_requested: Flow ended, callback logged
- * - appointment_booked: Flow ended, appointment confirmed
+ * Production Features:
+ * - Structured logging
+ * - Retry with exponential backoff
+ * - Delivery tracking
+ * - Error monitoring (Sentry)
  */
 
 const express = require('express');
-const rateLimit = require('express-rate-limit');
 const { query, getClient } = require('../db/config');
 const vonage = require('../services/vonage');
+const { sms: log } = require('../utils/logger');
+const { withSMSRetry } = require('../utils/retry');
+const { captureException } = require('../utils/sentry');
+const {
+  validateVonageSignature,
+  webhookPhoneLimiter,
+  webhookIPLimiter,
+  idempotencyCheck,
+  rollbackIdempotency
+} = require('../middleware/vonageWebhook');
 
 const router = express.Router();
 
-// Rate limiter for webhook protection
-const webhookLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 200,
-  message: { error: 'Too many requests' },
-  standardHeaders: true,
-  legacyHeaders: false
-});
-
-router.use(webhookLimiter);
-
-// =====================================================
-// INTENT MAPPING TABLE
-// =====================================================
-/**
- * State -> Valid Inputs -> Intent
- *
- * | State                      | Input | Intent              |
- * |----------------------------|-------|---------------------|
- * | awaiting_initial_choice    | 1     | book_appointment    |
- * | awaiting_initial_choice    | 2     | request_callback    |
- * | awaiting_slot_confirmation | 1     | confirm_slot        |
- * | awaiting_slot_confirmation | 2     | see_more_slots      |
- * | awaiting_slot_selection    | 1,2,3 | select_slot_N       |
- * | awaiting_slot_selection    | 4     | request_more_slots  |
- */
-
-// =====================================================
-// INBOUND SMS WEBHOOK (FROM VONAGE)
-// =====================================================
+// SMS cooldown in minutes - prevent spam to same number
+const SMS_COOLDOWN_MINUTES = 30;
 
 /**
- * Vonage inbound SMS webhook
- * POST /api/sms/incoming (or GET - Vonage supports both)
+ * Inbound SMS Webhook Handler
+ * POST /api/sms/incoming (primary)
+ * GET /api/sms/incoming (fallback for Vonage config)
  */
 async function handleInboundSMS(req, res) {
+  const startTime = Date.now();
+
   try {
-    // Vonage can send via GET (query params) or POST (body)
+    // Parse webhook data (Vonage sends different formats)
     const webhookData = req.method === 'GET' ? req.query : req.body;
-    console.log('Inbound SMS webhook received:', JSON.stringify(webhookData));
 
-    // Parse the incoming message
+    // Parse using Vonage service
     const parsed = vonage.parseInboundWebhook(webhookData);
-    const { from: callerPhone, to: smsNumber, message: messageBody } = parsed;
 
+    const { from: callerPhone, to: vonageNumber, message: messageBody, messageId } = parsed;
+
+    log.info({
+      from: callerPhone,
+      to: vonageNumber,
+      messageId,
+      bodyLength: messageBody?.length
+    }, 'Inbound SMS received');
+
+    // Validate required fields
     if (!callerPhone || !messageBody) {
-      console.log('Invalid inbound SMS webhook - missing from or body:', webhookData);
+      log.warn({ webhookData }, 'Invalid webhook: missing phone or message');
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    console.log(`Inbound SMS from ${callerPhone}: ${messageBody}`);
+    // Find user by their Vonage number (sms_reply_number in settings)
+    const userResult = await query(
+      `SELECT s.*, u.id as user_id, u.practice_name
+       FROM settings s
+       JOIN users u ON s.user_id = u.id
+       WHERE s.sms_reply_number = $1`,
+      [vonageNumber]
+    );
 
-    const normalizedCaller = vonage.normalizePhoneNumber(callerPhone);
-    let settings = null;
-
-    // Find user by SMS reply number
-    if (smsNumber) {
-      const settingsResult = await query(
+    // Fallback: try to find by the normalized phone number
+    let settings = userResult.rows[0];
+    if (!settings) {
+      const normalizedVonage = vonage.normalizePhoneNumber(vonageNumber);
+      const fallbackResult = await query(
         `SELECT s.*, u.id as user_id, u.practice_name
          FROM settings s
          JOIN users u ON s.user_id = u.id
          WHERE s.sms_reply_number = $1`,
-        [smsNumber]
+        [normalizedVonage]
       );
-      settings = settingsResult.rows[0];
+      settings = fallbackResult.rows[0];
     }
 
-    // If no match, find by most recent active conversation
+    // If still no match, try forwarding_phone as fallback
     if (!settings) {
-      const recentConv = await query(
+      const forwardingResult = await query(
         `SELECT s.*, u.id as user_id, u.practice_name
-         FROM conversations c
-         JOIN users u ON c.user_id = u.id
-         JOIN settings s ON s.user_id = u.id
-         WHERE c.caller_phone = $1
-           AND c.channel = 'sms'
-           AND c.status NOT IN ('completed', 'appointment_booked')
-         ORDER BY c.created_at DESC
+         FROM settings s
+         JOIN users u ON s.user_id = u.id
+         WHERE s.forwarding_phone = $1
          LIMIT 1`,
-        [normalizedCaller]
+        [vonage.normalizePhoneNumber(callerPhone)]
       );
-      settings = recentConv.rows[0];
+      settings = forwardingResult.rows[0];
     }
 
     if (!settings) {
-      console.log(`No user/conversation found for caller: ${callerPhone}`);
-      return res.json({ status: 'ok', action: 'no_user' });
+      log.warn({ vonageNumber, callerPhone }, 'No user found for Vonage number');
+      return res.json({ status: 'ok', action: 'no_user_found' });
     }
 
-    console.log(`Found user ${settings.user_id} (${settings.practice_name}) for caller ${callerPhone}`);
+    const userId = settings.user_id;
+    const practiceName = settings.practice_name || 'Our Practice';
 
-    // Find or create conversation
+    // Find or create active conversation
     let conversationResult = await query(
       `SELECT * FROM conversations
        WHERE user_id = $1 AND caller_phone = $2
          AND status NOT IN ('completed', 'appointment_booked')
        ORDER BY created_at DESC LIMIT 1`,
-      [settings.user_id, normalizedCaller]
+      [userId, callerPhone]
     );
 
+    let conversation = conversationResult.rows[0];
     let conversationId;
-    let isNewConversation = false;
 
-    if (conversationResult.rows.length === 0) {
+    if (!conversation) {
       // Create new conversation
-      const newConversation = await query(
-        `INSERT INTO conversations (user_id, caller_phone, channel, direction, status)
-         VALUES ($1, $2, 'sms', 'inbound', 'awaiting_initial_choice')
-         RETURNING id`,
-        [settings.user_id, normalizedCaller]
+      const newConv = await query(
+        `INSERT INTO conversations (user_id, caller_phone, channel, direction, status, state_data, last_activity_at)
+         VALUES ($1, $2, 'sms', 'inbound', 'awaiting_initial_choice', '{}', NOW())
+         RETURNING *`,
+        [userId, callerPhone]
       );
-      conversationId = newConversation.rows[0].id;
-      isNewConversation = true;
+      conversation = newConv.rows[0];
+      conversationId = conversation.id;
 
-      // Create a lead for this new conversation
+      // Create lead for new conversation
       await query(
         `INSERT INTO leads (user_id, conversation_id, name, phone, status, source)
-         VALUES ($1, $2, 'SMS Inquiry', $3, 'new', 'sms')`,
-        [settings.user_id, conversationId, normalizedCaller]
+         VALUES ($1, $2, 'SMS Contact', $3, 'new', 'sms')`,
+        [userId, conversationId, callerPhone]
       );
+
+      log.info({ userId, conversationId, callerPhone }, 'New conversation created');
     } else {
-      conversationId = conversationResult.rows[0].id;
+      conversationId = conversation.id;
     }
 
-    // Store the incoming message
-    await query(
-      `INSERT INTO messages (conversation_id, sender, content, message_type, delivered)
-       VALUES ($1, 'caller', $2, 'text', true)`,
-      [conversationId, messageBody]
-    );
-
-    // Handle conversation with numeric state machine
-    const aiResponse = await handleNumericConversation(conversationId, messageBody, settings, isNewConversation);
-
-    // Store AI response
-    await query(
-      `INSERT INTO messages (conversation_id, sender, content, message_type, delivered)
-       VALUES ($1, 'ai', $2, 'text', true)`,
-      [conversationId, aiResponse]
-    );
-
-    // Send response via Vonage (instant delivery)
-    const apiKey = process.env.VONAGE_API_KEY;
-    const apiSecret = process.env.VONAGE_API_SECRET;
-    const fromNumber = settings.sms_reply_number || process.env.VONAGE_FROM_NUMBER;
-
-    if (apiKey && apiSecret) {
-      const sendResult = await vonage.sendSMS(apiKey, apiSecret, callerPhone, aiResponse, fromNumber);
-      if (!sendResult.success) {
-        console.error('Failed to send SMS response:', sendResult.error);
+    // Store inbound message with idempotency
+    if (messageId) {
+      const existingMsg = await query(
+        `SELECT id FROM messages WHERE external_message_id = $1`,
+        [messageId]
+      );
+      if (existingMsg.rows.length > 0) {
+        log.info({ messageId }, 'Duplicate message, skipping');
+        return res.json({ status: 'ok', action: 'duplicate_skipped' });
       }
     }
 
-    res.json({ status: 'ok', action: 'responded' });
+    await query(
+      `INSERT INTO messages (conversation_id, sender, content, message_type, external_message_id, delivery_status, provider)
+       VALUES ($1, 'patient', $2, 'text', $3, 'delivered', 'vonage')`,
+      [conversationId, messageBody, messageId]
+    );
+
+    // Update conversation activity
+    await query(
+      `UPDATE conversations SET last_activity_at = NOW() WHERE id = $1`,
+      [conversationId]
+    );
+
+    // Update lead status to contacted (they replied)
+    await query(
+      `UPDATE leads SET status = CASE WHEN status = 'new' THEN 'contacted' ELSE status END
+       WHERE conversation_id = $1`,
+      [conversationId]
+    );
+
+    // Process conversation and generate response
+    const aiResponse = await handleConversation(conversationId, messageBody, settings, conversation);
+
+    // Send response with retry
+    const sendResult = await withSMSRetry(
+      () => vonage.sendSMS(
+        process.env.VONAGE_API_KEY,
+        process.env.VONAGE_API_SECRET,
+        callerPhone,
+        aiResponse,
+        settings.sms_reply_number || process.env.VONAGE_FROM_NUMBER
+      ),
+      { context: `sms-reply-${conversationId}` }
+    );
+
+    // Store outbound message
+    await query(
+      `INSERT INTO messages (conversation_id, sender, content, message_type, external_message_id, delivery_status, provider)
+       VALUES ($1, 'ai', $2, 'text', $3, $4, 'vonage')`,
+      [conversationId, aiResponse, sendResult.messageId || null, sendResult.success ? 'sent' : 'failed']
+    );
+
+    // Update last SMS timestamp for cooldown tracking
+    await query(
+      `UPDATE conversations SET last_sms_at = NOW() WHERE id = $1`,
+      [conversationId]
+    );
+
+    const duration = Date.now() - startTime;
+    log.info({
+      conversationId,
+      callerPhone,
+      responseLength: aiResponse.length,
+      durationMs: duration,
+      smsSent: sendResult.success
+    }, 'Inbound SMS processed');
+
+    return res.json({ status: 'ok', conversationId });
+
   } catch (error) {
-    console.error('Inbound SMS error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    log.error({ error: error.message, stack: error.stack }, 'Inbound SMS processing failed');
+    captureException(error, { context: 'inbound_sms' });
+
+    // Rollback idempotency to allow retry
+    rollbackIdempotency(req);
+
+    // Don't fail the webhook - Vonage will retry
+    return res.json({ status: 'error', message: 'Processing failed, will retry' });
   }
 }
 
-// Support both GET and POST for Vonage webhooks
-router.post('/incoming', handleInboundSMS);
+// Apply middleware and route handlers
+router.post('/incoming',
+  webhookIPLimiter,
+  webhookPhoneLimiter,
+  validateVonageSignature,
+  idempotencyCheck,
+  handleInboundSMS
+);
+
+// GET support for initial Vonage webhook verification (not recommended for production)
 router.get('/incoming', handleInboundSMS);
 
-// =====================================================
-// SMS DELIVERY STATUS WEBHOOK
-// =====================================================
-
-router.post('/status', async (req, res) => {
+/**
+ * SMS Delivery Status Webhook
+ * POST /api/sms/status
+ */
+router.post('/status', webhookIPLimiter, async (req, res) => {
   try {
-    const { message_id, status, error_code, error_message } = req.body;
+    const {
+      message_id: messageId,
+      'message-id': messageIdAlt,
+      status,
+      'error-code': errorCode,
+      'error-text': errorText
+    } = req.body;
 
-    if (error_code) {
-      console.error(`SMS delivery failed: ${error_code} - ${error_message}`);
-    } else {
-      console.log(`SMS ${message_id} status: ${status}`);
+    const msgId = messageId || messageIdAlt;
+
+    log.info({ messageId: msgId, status, errorCode }, 'SMS delivery status received');
+
+    if (!msgId) {
+      return res.json({ status: 'ok' });
     }
 
-    res.json({ status: 'ok' });
+    // Map Vonage status to our status
+    let deliveryStatus = 'unknown';
+    if (status === 'delivered') deliveryStatus = 'delivered';
+    else if (status === 'accepted' || status === 'buffered') deliveryStatus = 'sent';
+    else if (status === 'failed' || status === 'rejected') deliveryStatus = 'failed';
+    else if (status === 'expired') deliveryStatus = 'expired';
+
+    // Update message delivery status
+    await query(
+      `UPDATE messages
+       SET delivery_status = $1,
+           delivered_at = CASE WHEN $1 = 'delivered' THEN NOW() ELSE delivered_at END,
+           delivery_error = $2
+       WHERE external_message_id = $3`,
+      [deliveryStatus, errorCode ? `${errorCode}: ${errorText}` : null, msgId]
+    );
+
+    return res.json({ status: 'ok' });
   } catch (error) {
-    console.error('SMS status webhook error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    log.error({ error: error.message }, 'Delivery status processing failed');
+    return res.json({ status: 'ok' }); // Don't retry status webhooks
   }
 });
 
-// =====================================================
-// NUMERIC-ONLY CONVERSATION STATE MACHINE
-// =====================================================
+/**
+ * Health check endpoint
+ */
+router.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    provider: 'vonage',
+    configured: !!(process.env.VONAGE_API_KEY && process.env.VONAGE_API_SECRET)
+  });
+});
+
+// ============================================
+// CONVERSATION STATE MACHINE
+// ============================================
 
 /**
- * Parse numeric input from message
- * Only accepts single digits 1-9
- * @returns {number|null} - The number or null if invalid
+ * Main conversation handler - numeric-only state machine
+ * States:
+ * - awaiting_initial_choice: User picks 1 (callback) or 2 (appointment)
+ * - awaiting_slot_confirmation: Confirm offered slot (1=yes, 2=more options)
+ * - awaiting_slot_selection: Choose from multiple slots (1,2,3,4)
+ * - callback_requested: Flow complete - callback requested
+ * - appointment_booked: Flow complete - appointment booked
  */
-function parseNumericInput(message) {
-  const trimmed = message.trim();
+async function handleConversation(conversationId, incomingMessage, settings, conversation) {
+  const practiceName = settings.practice_name || 'Our Practice';
+  const currentStatus = conversation.status;
+  const stateData = conversation.state_data || {};
 
-  // Accept single digit, optionally with period or emoji
-  const match = trimmed.match(/^[1-9]\.?$/);
-  if (match) {
-    return parseInt(trimmed.charAt(0));
+  const trimmed = incomingMessage.trim();
+  const input = trimmed.toLowerCase();
+
+  // Handle opt-out keywords
+  if (['stop', 'unsubscribe', 'cancel', 'quit'].includes(input)) {
+    await updateConversationStatus(conversationId, 'completed', {});
+    await query(
+      `UPDATE leads SET status = 'lost', notes = 'Opted out via SMS' WHERE conversation_id = $1`,
+      [conversationId]
+    );
+    return `You've been unsubscribed. Reply START to opt back in. Contact ${practiceName} directly if you need help.`;
   }
 
-  // Also accept number words for accessibility
-  const wordMap = {
-    'one': 1, 'two': 2, 'three': 3, 'four': 4,
-    'five': 5, 'six': 6, 'seven': 7, 'eight': 8, 'nine': 9
-  };
-  const lower = trimmed.toLowerCase();
-  if (wordMap[lower]) {
-    return wordMap[lower];
+  // Handle opt-in
+  if (['start', 'subscribe', 'hi', 'hello'].includes(input)) {
+    await updateConversationStatus(conversationId, 'awaiting_initial_choice', {});
+    return `Hi! Thanks for contacting ${practiceName}.\n\nReply:\n1 - Request a callback\n2 - Book an appointment`;
   }
 
-  return null;
+  // Handle help
+  if (['help', 'info', '?'].includes(input)) {
+    return `${practiceName} SMS Booking:\n\n1 - Request a callback\n2 - Book an appointment\n\nReply STOP to opt out.`;
+  }
+
+  // Process based on current state
+  switch (currentStatus) {
+    case 'active':
+    case 'awaiting_initial_choice': {
+      // First response - user picks 1 or 2
+      if (trimmed === '1' || input === 'one' || input.includes('callback') || input.includes('call me')) {
+        await updateConversationStatus(conversationId, 'callback_requested', { intent: 'callback' });
+        await query(
+          `UPDATE leads SET status = 'qualified', preferred_time = 'Callback requested' WHERE conversation_id = $1`,
+          [conversationId]
+        );
+        return `Got it! Someone from ${practiceName} will call you back as soon as possible. Is there anything specific you'd like us to know?`;
+      }
+
+      if (trimmed === '2' || input === 'two' || input.includes('book') || input.includes('appointment')) {
+        // Get available slots
+        const slots = await getAvailableSlots(settings.user_id, settings.business_hours, 3);
+
+        if (slots.length === 0) {
+          await updateConversationStatus(conversationId, 'callback_requested', { intent: 'appointment_no_slots' });
+          await query(
+            `UPDATE leads SET status = 'qualified', preferred_time = 'No slots available' WHERE conversation_id = $1`,
+            [conversationId]
+          );
+          return `We're currently fully booked. Someone from ${practiceName} will call you to find a time that works.`;
+        }
+
+        // Offer first available slot
+        const firstSlot = slots[0];
+        const formattedSlot = formatSlotForSMS(firstSlot);
+
+        await updateConversationStatus(conversationId, 'awaiting_slot_confirmation', {
+          intent: 'appointment',
+          suggestedSlots: slots.map(s => s.toISOString()),
+          currentSlotIndex: 0
+        });
+
+        return `Great! Our next available slot is:\n\n${formattedSlot}\n\nReply:\n1 - Book this time\n2 - See more options`;
+      }
+
+      // Didn't understand - prompt again
+      return `Please reply:\n\n1 - Request a callback\n2 - Book an appointment`;
+    }
+
+    case 'awaiting_slot_confirmation': {
+      const suggestedSlots = (stateData.suggestedSlots || []).map(s => new Date(s));
+      const currentIndex = stateData.currentSlotIndex || 0;
+
+      if (trimmed === '1' || input === 'yes' || input === 'book') {
+        // Book the current slot
+        const selectedSlot = suggestedSlots[currentIndex];
+        if (!selectedSlot) {
+          await updateConversationStatus(conversationId, 'awaiting_initial_choice', {});
+          return `Sorry, something went wrong. Please reply 2 to try booking again.`;
+        }
+
+        const bookingResult = await bookAppointment(conversationId, selectedSlot, settings);
+
+        if (bookingResult.success) {
+          return `BOOKED! Your appointment at ${practiceName} is confirmed for:\n\n${formatSlotForSMS(selectedSlot)}\n\nSee you then!`;
+        } else {
+          // Slot was taken - offer alternative
+          const newSlots = await getAvailableSlots(settings.user_id, settings.business_hours, 3);
+          if (newSlots.length > 0) {
+            await updateConversationStatus(conversationId, 'awaiting_slot_confirmation', {
+              ...stateData,
+              suggestedSlots: newSlots.map(s => s.toISOString()),
+              currentSlotIndex: 0
+            });
+            return `Sorry, that time was just booked! Next available:\n\n${formatSlotForSMS(newSlots[0])}\n\nReply:\n1 - Book this time\n2 - See more options`;
+          } else {
+            await updateConversationStatus(conversationId, 'callback_requested', { intent: 'appointment_conflict' });
+            return `Sorry, we're now fully booked. Someone will call you to schedule.`;
+          }
+        }
+      }
+
+      if (trimmed === '2' || input === 'more' || input === 'other') {
+        // Show more options
+        if (suggestedSlots.length <= 1) {
+          // No more options - get fresh slots
+          const newSlots = await getAvailableSlots(settings.user_id, settings.business_hours, 4);
+          if (newSlots.length <= 1) {
+            await updateConversationStatus(conversationId, 'callback_requested', { intent: 'no_suitable_slots' });
+            return `We don't have many openings right now. Someone from ${practiceName} will call you to find a time.`;
+          }
+
+          await updateConversationStatus(conversationId, 'awaiting_slot_selection', {
+            ...stateData,
+            suggestedSlots: newSlots.map(s => s.toISOString())
+          });
+
+          const slotList = newSlots.slice(0, 4).map((s, i) => `${i + 1} - ${formatSlotForSMS(s)}`).join('\n');
+          return `Available times:\n\n${slotList}\n\nReply with the number of your preferred time.`;
+        }
+
+        // Move to selection mode with existing slots
+        await updateConversationStatus(conversationId, 'awaiting_slot_selection', stateData);
+
+        const slotList = suggestedSlots.slice(0, 4).map((s, i) => `${i + 1} - ${formatSlotForSMS(s)}`).join('\n');
+        return `Available times:\n\n${slotList}\n\nReply with the number of your preferred time.`;
+      }
+
+      return `Please reply:\n1 - Book this time\n2 - See more options`;
+    }
+
+    case 'awaiting_slot_selection': {
+      const suggestedSlots = (stateData.suggestedSlots || []).map(s => new Date(s));
+      const selection = parseInt(trimmed);
+
+      if (selection >= 1 && selection <= suggestedSlots.length) {
+        const selectedSlot = suggestedSlots[selection - 1];
+        const bookingResult = await bookAppointment(conversationId, selectedSlot, settings);
+
+        if (bookingResult.success) {
+          return `BOOKED! Your appointment at ${practiceName} is confirmed for:\n\n${formatSlotForSMS(selectedSlot)}\n\nSee you then!`;
+        } else {
+          const newSlots = await getAvailableSlots(settings.user_id, settings.business_hours, 4);
+          if (newSlots.length > 0) {
+            await updateConversationStatus(conversationId, 'awaiting_slot_selection', {
+              ...stateData,
+              suggestedSlots: newSlots.map(s => s.toISOString())
+            });
+            const slotList = newSlots.slice(0, 4).map((s, i) => `${i + 1} - ${formatSlotForSMS(s)}`).join('\n');
+            return `Sorry, that time was taken! Updated options:\n\n${slotList}\n\nReply with your choice.`;
+          } else {
+            await updateConversationStatus(conversationId, 'callback_requested', {});
+            return `Sorry, we're now fully booked. Someone will call you.`;
+          }
+        }
+      }
+
+      // Handle "4" for more options or callback request
+      if (trimmed === '4' || input.includes('call') || input.includes('other')) {
+        await updateConversationStatus(conversationId, 'callback_requested', { intent: 'different_time' });
+        await query(
+          `UPDATE leads SET status = 'qualified', preferred_time = 'Requested different time' WHERE conversation_id = $1`,
+          [conversationId]
+        );
+        return `No problem! Someone from ${practiceName} will call you to find a better time.`;
+      }
+
+      const slotList = suggestedSlots.slice(0, 4).map((s, i) => `${i + 1} - ${formatSlotForSMS(s)}`).join('\n');
+      return `Please reply with a number:\n\n${slotList}\n\nOr reply CALL ME for a callback.`;
+    }
+
+    case 'callback_requested': {
+      // Already requested callback - acknowledge any follow-up
+      if (input.includes('thank')) {
+        return `You're welcome! ${practiceName} will be in touch soon.`;
+      }
+      await query(
+        `UPDATE leads SET notes = COALESCE(notes, '') || E'\n' || $1 WHERE conversation_id = $2`,
+        [`Patient note: ${incomingMessage}`, conversationId]
+      );
+      return `Thanks for the info! We've noted it down. Someone will call you soon.`;
+    }
+
+    case 'appointment_booked': {
+      if (input.includes('cancel') || input.includes('change') || input.includes('reschedule')) {
+        return `To change your appointment, please call ${practiceName} directly or reply CALL ME and we'll reach out.`;
+      }
+      return `Thanks for your message! You have an appointment scheduled. Is there anything else we can help with?`;
+    }
+
+    default:
+      await updateConversationStatus(conversationId, 'awaiting_initial_choice', {});
+      return `Hi! Thanks for contacting ${practiceName}.\n\nReply:\n1 - Request a callback\n2 - Book an appointment`;
+  }
 }
 
 /**
- * Get or create conversation state data
+ * Update conversation status and state data
  */
-async function getConversationState(conversationId) {
-  const result = await query(
-    `SELECT content FROM messages
-     WHERE conversation_id = $1 AND message_type = 'system'
-     ORDER BY created_at DESC LIMIT 1`,
-    [conversationId]
-  );
-
-  if (result.rows.length === 0) {
-    return null;
-  }
-
-  try {
-    return JSON.parse(result.rows[0].content);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Save conversation state data
- */
-async function saveConversationState(conversationId, stateData) {
+async function updateConversationStatus(conversationId, status, stateData) {
   await query(
-    `INSERT INTO messages (conversation_id, sender, content, message_type)
-     VALUES ($1, 'system', $2, 'system')`,
-    [conversationId, JSON.stringify(stateData)]
+    `UPDATE conversations
+     SET status = $1, state_data = $2, last_activity_at = NOW()
+     WHERE id = $3`,
+    [status, JSON.stringify(stateData), conversationId]
   );
 }
 
 /**
- * Update conversation status
+ * Get available appointment slots - OPTIMIZED
+ * Queries all existing appointments in date range first, then filters in memory
  */
-async function updateConversationStatus(conversationId, status) {
-  await query(
-    `UPDATE conversations SET status = $1 WHERE id = $2`,
-    [status, conversationId]
-  );
-}
-
-/**
- * Format a single slot for display
- */
-function formatSlot(slot) {
-  const date = new Date(slot);
-  const day = date.toLocaleDateString('en-AU', { weekday: 'long' });
-  const time = date.toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit', hour12: true });
-  return `${day} ${time}`;
-}
-
-/**
- * Get available slots from business hours, checking against existing appointments
- */
-async function getAvailableSlots(userId, businessHours, numSlots = 3, startOffset = 0) {
+async function getAvailableSlots(userId, businessHours, numSlots = 3) {
   const now = new Date();
-  const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+  const maxDays = 14;
 
+  // Default business hours if not set
   const defaultHours = {
     monday: { enabled: true, open: '09:00', close: '17:00' },
     tuesday: { enabled: true, open: '09:00', close: '17:00' },
     wednesday: { enabled: true, open: '09:00', close: '17:00' },
     thursday: { enabled: true, open: '09:00', close: '17:00' },
     friday: { enabled: true, open: '09:00', close: '17:00' },
-    saturday: { enabled: false, open: '09:00', close: '13:00' },
-    sunday: { enabled: false, open: '09:00', close: '13:00' }
+    saturday: { enabled: false },
+    sunday: { enabled: false }
   };
 
   const hours = businessHours && Object.keys(businessHours).length > 0 ? businessHours : defaultHours;
-  const slots = [];
-  let slotsSkipped = 0;
-  let daysChecked = 0;
+  const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 
-  while (slots.length < numSlots && daysChecked < 30) {
-    const checkDate = new Date(now);
-    checkDate.setDate(now.getDate() + daysChecked);
+  // Calculate date range
+  const startDate = now.toISOString().split('T')[0];
+  const endDate = new Date(now.getTime() + maxDays * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
+  // Fetch ALL existing appointments in range (single query instead of N queries)
+  const existingAppointments = await query(
+    `SELECT appointment_date, appointment_time
+     FROM appointments
+     WHERE user_id = $1
+       AND appointment_date BETWEEN $2 AND $3
+       AND status NOT IN ('cancelled', 'no_show')`,
+    [userId, startDate, endDate]
+  );
+
+  // Create a Set of booked slots for O(1) lookup
+  const bookedSlots = new Set(
+    existingAppointments.rows.map(row => {
+      const date = row.appointment_date instanceof Date
+        ? row.appointment_date.toISOString().split('T')[0]
+        : row.appointment_date;
+      return `${date}T${row.appointment_time}`;
+    })
+  );
+
+  // Generate available slots
+  const availableSlots = [];
+  let checkDate = new Date(now);
+
+  while (availableSlots.length < numSlots && checkDate <= new Date(endDate)) {
     const dayName = dayNames[checkDate.getDay()];
-    const dayHours = hours[dayName];
+    const dayConfig = hours[dayName];
 
-    if (dayHours && dayHours.enabled) {
-      const [openHour, openMin] = dayHours.open.split(':').map(Number);
-      const [closeHour, closeMin] = dayHours.close.split(':').map(Number);
+    if (dayConfig?.enabled) {
+      const [openHour, openMin] = dayConfig.open.split(':').map(Number);
+      const [closeHour, closeMin] = dayConfig.close.split(':').map(Number);
 
+      // Start from opening time (or current time + 1 hour if today)
       let slotTime = new Date(checkDate);
       slotTime.setHours(openHour, openMin, 0, 0);
 
       const closeTime = new Date(checkDate);
       closeTime.setHours(closeHour, closeMin, 0, 0);
 
-      // For today, start at least 1 hour from now
       const isToday = checkDate.toDateString() === now.toDateString();
       const minTime = isToday ? new Date(now.getTime() + 60 * 60 * 1000) : slotTime;
 
-      while (slotTime < closeTime && slots.length < numSlots) {
+      while (slotTime < closeTime && availableSlots.length < numSlots) {
         if (slotTime >= minTime) {
           const slotDate = slotTime.toISOString().split('T')[0];
           const slotTimeStr = slotTime.toTimeString().slice(0, 5);
+          const slotKey = `${slotDate}T${slotTimeStr}`;
 
-          // Check if slot is already booked
-          const existing = await query(
-            `SELECT id FROM appointments
-             WHERE user_id = $1
-               AND appointment_date = $2::date
-               AND appointment_time = $3
-               AND status NOT IN ('cancelled', 'no_show')
-             LIMIT 1`,
-            [userId, slotDate, slotTimeStr]
-          );
-
-          if (existing.rows.length === 0) {
-            // Slot is available
-            if (slotsSkipped >= startOffset) {
-              slots.push(new Date(slotTime));
-            } else {
-              slotsSkipped++;
-            }
+          if (!bookedSlots.has(slotKey)) {
+            availableSlots.push(new Date(slotTime));
           }
         }
-        slotTime = new Date(slotTime.getTime() + 30 * 60 * 1000);
+        slotTime = new Date(slotTime.getTime() + 30 * 60 * 1000); // 30-minute slots
       }
     }
 
-    daysChecked++;
+    checkDate.setDate(checkDate.getDate() + 1);
+    checkDate.setHours(0, 0, 0, 0);
   }
 
-  return slots;
+  return availableSlots;
 }
 
 /**
- * Book an appointment
+ * Book an appointment with proper transaction handling
+ * Uses SERIALIZABLE isolation to prevent double-booking
  */
-async function bookAppointment(conversationId, settings, selectedSlot) {
-  const appointmentDate = selectedSlot.toISOString().split('T')[0];
-  const appointmentTime = selectedSlot.toTimeString().slice(0, 5);
-  const formattedTime = formatSlot(selectedSlot);
-
+async function bookAppointment(conversationId, slotTime, settings) {
   const client = await getClient();
 
   try {
     await client.query('BEGIN');
     await client.query('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE');
 
-    // Double-check slot is still available
-    const existingBooking = await client.query(
+    const appointmentDate = slotTime.toISOString().split('T')[0];
+    const appointmentTime = slotTime.toTimeString().slice(0, 5);
+
+    // Check for conflict with row lock
+    const conflict = await client.query(
       `SELECT id FROM appointments
        WHERE user_id = $1
-         AND appointment_date = $2::date
+         AND appointment_date = $2
          AND appointment_time = $3
          AND status NOT IN ('cancelled', 'no_show')
        FOR UPDATE`,
       [settings.user_id, appointmentDate, appointmentTime]
     );
 
-    if (existingBooking.rows.length > 0) {
+    if (conflict.rows.length > 0) {
       await client.query('ROLLBACK');
-      client.release();
-      return { success: false, error: 'slot_taken' };
+      log.warn({ appointmentDate, appointmentTime }, 'Slot conflict detected');
+      return { success: false, reason: 'slot_taken' };
     }
 
-    // Update conversation
-    await client.query(
-      `UPDATE conversations SET status = 'appointment_booked', ended_at = NOW() WHERE id = $1`,
+    // Get conversation details for appointment
+    const convResult = await client.query(
+      `SELECT c.caller_phone, l.id as lead_id, l.name as lead_name
+       FROM conversations c
+       LEFT JOIN leads l ON l.conversation_id = c.id
+       WHERE c.id = $1`,
       [conversationId]
     );
 
+    const conv = convResult.rows[0];
+    if (!conv) {
+      await client.query('ROLLBACK');
+      return { success: false, reason: 'conversation_not_found' };
+    }
+
+    // Create appointment
+    const appointmentResult = await client.query(
+      `INSERT INTO appointments (user_id, lead_id, conversation_id, patient_name, patient_phone, appointment_date, appointment_time, status, reason)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'scheduled', 'SMS Booking')
+       RETURNING id`,
+      [settings.user_id, conv.lead_id, conversationId, conv.lead_name || 'SMS Booking', conv.caller_phone, appointmentDate, appointmentTime]
+    );
+
+    const appointmentId = appointmentResult.rows[0].id;
+
+    // Update conversation
+    await client.query(
+      `UPDATE conversations SET status = 'appointment_booked', state_data = $1 WHERE id = $2`,
+      [JSON.stringify({ appointmentId, bookedAt: new Date().toISOString() }), conversationId]
+    );
+
     // Update lead
+    const formattedTime = slotTime.toLocaleString('en-AU', {
+      weekday: 'short',
+      day: 'numeric',
+      month: 'short',
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true
+    });
+
     await client.query(
       `UPDATE leads
        SET status = 'converted',
            appointment_booked = true,
            appointment_time = $1,
-           preferred_time = $2,
-           reason = 'Appointment booked via SMS'
+           appointment_id = $2
        WHERE conversation_id = $3`,
-      [selectedSlot.toISOString(), formattedTime, conversationId]
-    );
-
-    // Create appointment
-    await client.query(
-      `INSERT INTO appointments (user_id, lead_id, patient_name, patient_phone, appointment_date, appointment_time, reason, status)
-       SELECT c.user_id, l.id, COALESCE(NULLIF(l.name, ''), 'SMS Booking'), c.caller_phone, $1::date, $2, 'Booked via SMS', 'scheduled'
-       FROM conversations c
-       LEFT JOIN leads l ON l.conversation_id = c.id
-       WHERE c.id = $3`,
-      [appointmentDate, appointmentTime, conversationId]
+      [slotTime.toISOString(), appointmentId, conversationId]
     );
 
     await client.query('COMMIT');
-    client.release();
 
-    return { success: true, formattedTime };
-  } catch (txError) {
+    log.info({
+      conversationId,
+      appointmentId,
+      appointmentDate,
+      appointmentTime
+    }, 'Appointment booked successfully');
+
+    return { success: true, appointmentId };
+
+  } catch (error) {
     await client.query('ROLLBACK');
+
+    if (error.code === '40001') {
+      // Serialization failure - concurrent booking
+      log.warn({ conversationId, error: error.message }, 'Serialization conflict');
+      return { success: false, reason: 'concurrent_booking' };
+    }
+
+    log.error({ conversationId, error: error.message }, 'Booking failed');
+    captureException(error, { context: 'book_appointment', conversationId });
+    return { success: false, reason: 'error' };
+
+  } finally {
     client.release();
-
-    if (txError.code === '40001') {
-      return { success: false, error: 'slot_taken' };
-    }
-
-    console.error('Booking transaction error:', txError);
-    return { success: false, error: 'system_error' };
   }
 }
 
 /**
- * Main numeric conversation handler
+ * Format a slot for SMS display
  */
-async function handleNumericConversation(conversationId, incomingMessage, settings, isNewConversation) {
-  const practiceName = settings.practice_name || 'Our Practice';
-  const trimmedInput = incomingMessage.trim().toLowerCase();
-
-  // Get current conversation state
-  const convResult = await query(
-    `SELECT * FROM conversations WHERE id = $1`,
-    [conversationId]
-  );
-
-  if (convResult.rows.length === 0) {
-    return buildInitialPrompt(practiceName);
-  }
-
-  const conversation = convResult.rows[0];
-  const currentStatus = conversation.status;
-
-  // Handle opt-out keywords (these always work regardless of state)
-  if (trimmedInput === 'stop' || trimmedInput === 'unsubscribe' || trimmedInput === 'quit') {
-    await query(
-      `UPDATE conversations SET status = 'completed', ended_at = NOW() WHERE id = $1`,
-      [conversationId]
-    );
-    await query(
-      `UPDATE leads SET status = 'not_interested', notes = 'Opted out via SMS' WHERE conversation_id = $1`,
-      [conversationId]
-    );
-    return `You've been unsubscribed from ${practiceName}. Reply START to opt back in.`;
-  }
-
-  if (trimmedInput === 'start' || trimmedInput === 'subscribe') {
-    await updateConversationStatus(conversationId, 'awaiting_initial_choice');
-    return buildInitialPrompt(practiceName);
-  }
-
-  // Parse numeric input
-  const numericInput = parseNumericInput(incomingMessage);
-
-  // Get last state data for context
-  const stateData = await getConversationState(conversationId);
-
-  // Handle based on current state
-  switch (currentStatus) {
-    // =========================================================
-    // STATE: AWAITING INITIAL CHOICE (1=book, 2=callback)
-    // =========================================================
-    case 'awaiting_initial_choice':
-    case 'active':
-    case 'awaiting_response': {
-      if (numericInput === 1) {
-        // Patient wants to book appointment
-        const slots = await getAvailableSlots(settings.user_id, settings.business_hours, 1, 0);
-
-        if (slots.length === 0) {
-          await updateConversationStatus(conversationId, 'callback_requested');
-          await query(
-            `UPDATE leads SET status = 'qualified', reason = 'No slots available' WHERE conversation_id = $1`,
-            [conversationId]
-          );
-          return `We're currently fully booked. Someone from ${practiceName} will call you to find a time that works.\n\nWe'll be in touch soon!`;
-        }
-
-        const firstSlot = slots[0];
-        await saveConversationState(conversationId, {
-          state: 'awaiting_slot_confirmation',
-          current_slot: firstSlot.toISOString(),
-          slot_offset: 0
-        });
-        await updateConversationStatus(conversationId, 'awaiting_slot_confirmation');
-
-        return buildSlotConfirmationPrompt(firstSlot);
-      }
-
-      if (numericInput === 2) {
-        // Patient wants callback
-        await updateConversationStatus(conversationId, 'callback_requested');
-        await query(
-          `UPDATE leads SET status = 'qualified', reason = 'Callback requested' WHERE conversation_id = $1`,
-          [conversationId]
-        );
-        return `Got it! Someone from ${practiceName} will call you back shortly.\n\nThanks for getting in touch!`;
-      }
-
-      // Invalid input - resend prompt
-      return buildInitialPrompt(practiceName) + `\n\nPlease reply with 1 or 2.`;
-    }
-
-    // =========================================================
-    // STATE: AWAITING SLOT CONFIRMATION (1=confirm, 2=more)
-    // =========================================================
-    case 'awaiting_slot_confirmation': {
-      if (numericInput === 1) {
-        // Confirm the offered slot
-        if (!stateData || !stateData.current_slot) {
-          // State lost - restart flow
-          await updateConversationStatus(conversationId, 'awaiting_initial_choice');
-          return buildInitialPrompt(practiceName);
-        }
-
-        const selectedSlot = new Date(stateData.current_slot);
-        const result = await bookAppointment(conversationId, settings, selectedSlot);
-
-        if (result.success) {
-          return buildConfirmationMessage(practiceName, result.formattedTime, settings.booking_mode);
-        }
-
-        if (result.error === 'slot_taken') {
-          // Slot was taken - offer next available
-          const newSlots = await getAvailableSlots(settings.user_id, settings.business_hours, 1, 0);
-          if (newSlots.length > 0) {
-            await saveConversationState(conversationId, {
-              state: 'awaiting_slot_confirmation',
-              current_slot: newSlots[0].toISOString(),
-              slot_offset: 0
-            });
-            return `Sorry, that time was just booked!\n\n` + buildSlotConfirmationPrompt(newSlots[0]);
-          }
-
-          await updateConversationStatus(conversationId, 'callback_requested');
-          await query(
-            `UPDATE leads SET status = 'qualified', reason = 'Time booked, no alternatives' WHERE conversation_id = $1`,
-            [conversationId]
-          );
-          return `Sorry, that time was just booked and we're now fully booked. We'll call you to find a time that works.`;
-        }
-
-        return `We had a technical issue. Please try again or call ${practiceName} directly.`;
-      }
-
-      if (numericInput === 2) {
-        // Show more options
-        const offset = (stateData?.slot_offset || 0);
-        const slots = await getAvailableSlots(settings.user_id, settings.business_hours, 3, offset);
-
-        if (slots.length === 0) {
-          await updateConversationStatus(conversationId, 'callback_requested');
-          await query(
-            `UPDATE leads SET status = 'qualified', reason = 'No available times' WHERE conversation_id = $1`,
-            [conversationId]
-          );
-          return `No more available times in the next few weeks. We'll call you to find a time that works!`;
-        }
-
-        await saveConversationState(conversationId, {
-          state: 'awaiting_slot_selection',
-          slots: slots.map(s => s.toISOString()),
-          slot_offset: offset + 3
-        });
-        await updateConversationStatus(conversationId, 'awaiting_slot_selection');
-
-        return buildSlotSelectionPrompt(slots);
-      }
-
-      // Invalid input - resend current prompt
-      if (stateData && stateData.current_slot) {
-        return buildSlotConfirmationPrompt(new Date(stateData.current_slot)) + `\n\nPlease reply with 1 or 2.`;
-      }
-
-      return buildInitialPrompt(practiceName);
-    }
-
-    // =========================================================
-    // STATE: AWAITING SLOT SELECTION (1,2,3=select, 4=more)
-    // =========================================================
-    case 'awaiting_slot_selection': {
-      if (!stateData || !stateData.slots || stateData.slots.length === 0) {
-        // State lost - restart
-        await updateConversationStatus(conversationId, 'awaiting_initial_choice');
-        return buildInitialPrompt(practiceName);
-      }
-
-      const availableSlots = stateData.slots.map(s => new Date(s));
-
-      if (numericInput >= 1 && numericInput <= 3 && numericInput <= availableSlots.length) {
-        // Select specific slot
-        const selectedSlot = availableSlots[numericInput - 1];
-        const result = await bookAppointment(conversationId, settings, selectedSlot);
-
-        if (result.success) {
-          return buildConfirmationMessage(practiceName, result.formattedTime, settings.booking_mode);
-        }
-
-        if (result.error === 'slot_taken') {
-          // Slot taken - refresh the list
-          const newSlots = await getAvailableSlots(settings.user_id, settings.business_hours, 3, 0);
-          if (newSlots.length > 0) {
-            await saveConversationState(conversationId, {
-              state: 'awaiting_slot_selection',
-              slots: newSlots.map(s => s.toISOString()),
-              slot_offset: 3
-            });
-            return `Sorry, that time was just booked!\n\n` + buildSlotSelectionPrompt(newSlots);
-          }
-
-          await updateConversationStatus(conversationId, 'callback_requested');
-          await query(
-            `UPDATE leads SET status = 'qualified', reason = 'All slots booked' WHERE conversation_id = $1`,
-            [conversationId]
-          );
-          return `Sorry, all those times were just booked. We'll call you to find a time that works!`;
-        }
-
-        return `We had a technical issue. Please try again or call ${practiceName} directly.`;
-      }
-
-      if (numericInput === 4) {
-        // Request more options
-        const nextOffset = stateData.slot_offset || 3;
-        const newSlots = await getAvailableSlots(settings.user_id, settings.business_hours, 3, nextOffset);
-
-        if (newSlots.length === 0) {
-          // No more slots - offer callback
-          await updateConversationStatus(conversationId, 'callback_requested');
-          await query(
-            `UPDATE leads SET status = 'qualified', reason = 'No more slots available' WHERE conversation_id = $1`,
-            [conversationId]
-          );
-          return `No more available times in the next few weeks. We'll call you to find a time that works!\n\nSomeone from ${practiceName} will be in touch soon.`;
-        }
-
-        await saveConversationState(conversationId, {
-          state: 'awaiting_slot_selection',
-          slots: newSlots.map(s => s.toISOString()),
-          slot_offset: nextOffset + 3
-        });
-
-        return buildSlotSelectionPrompt(newSlots);
-      }
-
-      // Invalid input - resend current prompt
-      return buildSlotSelectionPrompt(availableSlots) + `\n\nPlease reply with a number from the options above.`;
-    }
-
-    // =========================================================
-    // STATE: CALLBACK REQUESTED (flow ended)
-    // =========================================================
-    case 'callback_requested': {
-      return `Thanks for your message! Someone from ${practiceName} will call you back soon.\n\nReply 1 to book an appointment instead.`;
-    }
-
-    // =========================================================
-    // STATE: APPOINTMENT BOOKED (flow ended)
-    // =========================================================
-    case 'appointment_booked': {
-      return `You have an appointment booked with ${practiceName}.\n\nNeed to change it? Reply CALL and we'll get in touch.`;
-    }
-
-    // =========================================================
-    // DEFAULT / UNKNOWN STATE
-    // =========================================================
-    default: {
-      await updateConversationStatus(conversationId, 'awaiting_initial_choice');
-      return buildInitialPrompt(practiceName);
-    }
-  }
-}
-
-// =====================================================
-// MESSAGE TEMPLATES
-// =====================================================
-
-/**
- * Build initial prompt (Step 1)
- */
-function buildInitialPrompt(practiceName) {
-  return `Hi! This is ${practiceName} following up on your missed call.
-
-Reply:
-1 - Book an appointment
-2 - Request a callback`;
-}
-
-/**
- * Build slot confirmation prompt (Step 2)
- */
-function buildSlotConfirmationPrompt(slot) {
-  const formatted = formatSlot(slot);
-
-  return `Thanks! Our next available appointment is:
-
-${formatted}
-
-Reply:
-1 - Confirm this time
-2 - See other available times`;
-}
-
-/**
- * Build slot selection prompt (Step 3B)
- */
-function buildSlotSelectionPrompt(slots) {
-  let message = `Choose a time:\n`;
-
-  slots.forEach((slot, index) => {
-    message += `\n${index + 1} - ${formatSlot(slot)}`;
+function formatSlotForSMS(slot) {
+  return slot.toLocaleString('en-AU', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'short',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true
   });
-
-  message += `\n4 - Show different times`;
-
-  return message;
 }
-
-/**
- * Build confirmation message (Step 3A / 4A)
- */
-function buildConfirmationMessage(practiceName, formattedTime, bookingMode) {
-  if (bookingMode === 'auto') {
-    return `CONFIRMED! Your appointment is booked:
-
-${formattedTime}
-${practiceName}
-
-See you then!`;
-  }
-
-  return `RECEIVED! Your appointment request:
-
-${formattedTime}
-${practiceName}
-
-We'll confirm shortly.`;
-}
-
-// =====================================================
-// HEALTH CHECK
-// =====================================================
-
-router.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    service: 'sms-webhooks',
-    provider: 'vonage',
-    flow: 'numeric-only',
-    timestamp: new Date().toISOString()
-  });
-});
 
 module.exports = router;

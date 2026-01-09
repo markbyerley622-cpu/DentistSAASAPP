@@ -1,7 +1,7 @@
 {
   "name": "dentistai-backend",
-  "version": "1.0.0",
-  "description": "DentistAI Backend API",
+  "version": "1.1.0",
+  "description": "SmileDesk Backend API - Dental Practice SMS Booking",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
@@ -10,21 +10,25 @@
     "seed": "node src/db/seed.js"
   },
   "dependencies": {
+    "@sentry/node": "^8.0.0",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
     "express-rate-limit": "^8.2.1",
-    "googleapis": "^129.0.0",
     "helmet": "^7.1.0",
     "joi": "^18.0.2",
     "jsonwebtoken": "^9.0.2",
-    "morgan": "^1.10.0",
     "pg": "^8.11.3",
+    "pino": "^9.0.0",
     "twilio": "^4.20.0",
     "uuid": "^9.0.1"
   },
   "devDependencies": {
-    "nodemon": "^3.0.2"
+    "nodemon": "^3.0.2",
+    "pino-pretty": "^11.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
