@@ -95,7 +95,6 @@ export default function Settings() {
     smsReplyNumber: '',
     notificationEmail: true,
     notificationSms: false,
-    bookingMode: 'manual',
     aiGreeting: '',
     businessHours: {}
   })
@@ -128,7 +127,6 @@ export default function Settings() {
           smsReplyNumber: s.smsReplyNumber || '',
           notificationEmail: s.notificationEmail,
           notificationSms: s.notificationSms,
-          bookingMode: s.bookingMode,
           aiGreeting: s.aiGreeting || '',
           businessHours: s.businessHours || {}
         })
@@ -202,8 +200,7 @@ export default function Settings() {
     try {
       await settingsAPI.update({
         notificationEmail: settings.notificationEmail,
-        notificationSms: settings.notificationSms,
-        bookingMode: settings.bookingMode
+        notificationSms: settings.notificationSms
       })
       setSuccess('Settings saved successfully!')
     } catch (err) {
@@ -513,56 +510,6 @@ export default function Settings() {
           <button onClick={handleSaveSettings} disabled={saving} className="btn-primary">
             {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
             <span className="ml-2">Save Notifications</span>
-          </button>
-        </div>
-      </SettingsSection>
-
-      {/* Booking Mode */}
-      <SettingsSection
-        title="Booking Mode"
-        description="Control how appointments are scheduled"
-        icon={Clock}
-      >
-        <div className="space-y-3">
-          {[
-            { value: 'manual', label: 'Manual', description: 'Review and confirm all appointments manually' },
-            { value: 'auto', label: 'Automatic', description: 'AI books appointments directly to your calendar' },
-            { value: 'suggest', label: 'Suggest Only', description: 'AI suggests times, you confirm' }
-          ].map((mode) => (
-            <label
-              key={mode.value}
-              className={`flex items-center gap-4 p-4 rounded-lg border cursor-pointer transition-colors ${
-                settings.bookingMode === mode.value
-                  ? 'bg-accent-500/10 border-accent-500/30'
-                  : 'bg-dark-800/50 border-dark-700/50 hover:border-dark-600'
-              }`}
-            >
-              <input
-                type="radio"
-                name="bookingMode"
-                value={mode.value}
-                checked={settings.bookingMode === mode.value}
-                onChange={(e) => setSettings({ ...settings, bookingMode: e.target.value })}
-                className="sr-only"
-              />
-              <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${
-                settings.bookingMode === mode.value
-                  ? 'border-accent-500 bg-accent-500'
-                  : 'border-dark-500'
-              }`}>
-                {settings.bookingMode === mode.value && (
-                  <Check className="w-3 h-3 text-white" />
-                )}
-              </div>
-              <div>
-                <p className="font-medium text-dark-200">{mode.label}</p>
-                <p className="text-sm text-dark-400">{mode.description}</p>
-              </div>
-            </label>
-          ))}
-          <button onClick={handleSaveSettings} disabled={saving} className="btn-primary mt-4">
-            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-            <span className="ml-2">Save Booking Mode</span>
           </button>
         </div>
       </SettingsSection>
