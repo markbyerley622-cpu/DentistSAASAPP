@@ -477,38 +477,34 @@ export default function MissedCalls() {
             <p className="text-dark-400 font-medium">Loading calls...</p>
           </div>
         </div>
-      ) : calls.length === 0 ? (
-        <div className="text-center py-16">
-          <div className="w-20 h-20 rounded-2xl bg-dark-800/50 flex items-center justify-center mx-auto mb-6">
-            <PhoneMissed className="w-10 h-10 text-dark-600" />
-          </div>
-          <p className="text-dark-200 text-xl font-semibold">No missed calls</p>
-          <p className="text-dark-500 mt-2 max-w-sm mx-auto">
-            {search ? 'Try a different search term' : 'When someone calls and you miss it, they\'ll show up here'}
-          </p>
-        </div>
       ) : (
         <div className="space-y-8">
-          {/* During Business Hours Section */}
-          {duringHoursCalls.length > 0 && (
-            <div className="space-y-4">
-              {/* Section Header */}
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-warning-500/20 to-orange-500/20 flex items-center justify-center ring-1 ring-warning-500/30">
-                  <Sun className="w-5 h-5 text-warning-400" />
-                </div>
-                <div>
-                  <h2 className="text-lg font-semibold text-dark-100">During Business Hours</h2>
-                  <p className="text-sm text-dark-500">
-                    {duringHoursCalls.length} {duringHoursCalls.length === 1 ? 'call' : 'calls'}
-                    {duringHoursNeedCall > 0 && (
-                      <span className="text-danger-400 ml-2">• {duringHoursNeedCall} need callback</span>
-                    )}
-                  </p>
-                </div>
+          {/* During Business Hours Section - Always shown first */}
+          <div className="space-y-4">
+            {/* Section Header */}
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-warning-500/20 to-orange-500/20 flex items-center justify-center ring-1 ring-warning-500/30">
+                <Sun className="w-5 h-5 text-warning-400" />
               </div>
+              <div>
+                <h2 className="text-lg font-semibold text-dark-100">During Business Hours</h2>
+                <p className="text-sm text-dark-500">
+                  {duringHoursCalls.length > 0 ? (
+                    <>
+                      {duringHoursCalls.length} {duringHoursCalls.length === 1 ? 'call' : 'calls'}
+                      {duringHoursNeedCall > 0 && (
+                        <span className="text-danger-400 ml-2">• {duringHoursNeedCall} need callback</span>
+                      )}
+                    </>
+                  ) : (
+                    <span className="text-success-400">All caught up!</span>
+                  )}
+                </p>
+              </div>
+            </div>
 
-              {/* Calls list */}
+            {/* Calls list or empty state */}
+            {duringHoursCalls.length > 0 ? (
               <div className="space-y-3 pl-2 border-l-2 border-warning-500/30 ml-5">
                 {duringHoursCalls.map((call) => (
                   <CallCard
@@ -521,29 +517,42 @@ export default function MissedCalls() {
                   />
                 ))}
               </div>
-            </div>
-          )}
-
-          {/* After Hours Section */}
-          {afterHoursCalls.length > 0 && (
-            <div className="space-y-4">
-              {/* Section Header */}
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-500/20 to-indigo-500/20 flex items-center justify-center ring-1 ring-purple-500/30">
-                  <Moon className="w-5 h-5 text-purple-400" />
-                </div>
-                <div>
-                  <h2 className="text-lg font-semibold text-dark-100">After Hours & Weekends</h2>
-                  <p className="text-sm text-dark-500">
-                    {afterHoursCalls.length} {afterHoursCalls.length === 1 ? 'call' : 'calls'} • AI handled these
-                    {afterHoursNeedCall > 0 && (
-                      <span className="text-danger-400 ml-2">• {afterHoursNeedCall} need callback</span>
-                    )}
-                  </p>
+            ) : (
+              <div className="ml-5 pl-4 border-l-2 border-warning-500/20">
+                <div className="flex items-center gap-3 py-6 px-4 rounded-xl bg-dark-800/30 border border-dark-700/30">
+                  <CheckCircle2 className="w-5 h-5 text-success-400" />
+                  <p className="text-dark-300">No missed calls during business hours</p>
                 </div>
               </div>
+            )}
+          </div>
 
-              {/* Calls list */}
+          {/* After Hours Section - Always shown */}
+          <div className="space-y-4">
+            {/* Section Header */}
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-500/20 to-indigo-500/20 flex items-center justify-center ring-1 ring-purple-500/30">
+                <Moon className="w-5 h-5 text-purple-400" />
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold text-dark-100">After Hours & Weekends</h2>
+                <p className="text-sm text-dark-500">
+                  {afterHoursCalls.length > 0 ? (
+                    <>
+                      {afterHoursCalls.length} {afterHoursCalls.length === 1 ? 'call' : 'calls'} • AI handled these
+                      {afterHoursNeedCall > 0 && (
+                        <span className="text-danger-400 ml-2">• {afterHoursNeedCall} need callback</span>
+                      )}
+                    </>
+                  ) : (
+                    <span className="text-success-400">All caught up!</span>
+                  )}
+                </p>
+              </div>
+            </div>
+
+            {/* Calls list or empty state */}
+            {afterHoursCalls.length > 0 ? (
               <div className="space-y-3 pl-2 border-l-2 border-purple-500/30 ml-5">
                 {afterHoursCalls.map((call) => (
                   <CallCard
@@ -556,8 +565,15 @@ export default function MissedCalls() {
                   />
                 ))}
               </div>
-            </div>
-          )}
+            ) : (
+              <div className="ml-5 pl-4 border-l-2 border-purple-500/20">
+                <div className="flex items-center gap-3 py-6 px-4 rounded-xl bg-dark-800/30 border border-dark-700/30">
+                  <CheckCircle2 className="w-5 h-5 text-success-400" />
+                  <p className="text-dark-300">No after-hours calls</p>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
