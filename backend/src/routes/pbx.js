@@ -112,6 +112,7 @@ async function findUserByPhone(phone) {
 
 /**
  * Process a missed call and send SMS follow-up
+ * UPDATED: Both reply options result in callbacks (intent classification only)
  */
 async function processMissedCall(userId, callerPhone, settings, callSid = null, hasVoicemail = false) {
   const practiceName = settings.practice_name || 'Our Practice';
@@ -127,8 +128,8 @@ async function processMissedCall(userId, callerPhone, settings, callSid = null, 
   if (hasVoicemail) {
     // Still record the call
     await query(
-      `INSERT INTO calls (user_id, twilio_call_sid, caller_phone, status, is_missed, followup_status)
-       VALUES ($1, $2, $3, 'no-answer', true, 'completed')`,
+      `INSERT INTO calls (user_id, twilio_call_sid, caller_phone, status, is_missed, followup_status, receptionist_status)
+       VALUES ($1, $2, $3, 'no-answer', true, 'completed', 'pending')`,
       [userId, callSid, callerPhone]
     );
 
@@ -143,10 +144,10 @@ async function processMissedCall(userId, callerPhone, settings, callSid = null, 
     return { smsSent: false, reason: 'cooldown' };
   }
 
-  // Create call record
+  // Create call record with new fields
   const callResult = await query(
-    `INSERT INTO calls (user_id, twilio_call_sid, caller_phone, status, is_missed, followup_status)
-     VALUES ($1, $2, $3, 'no-answer', true, 'pending')
+    `INSERT INTO calls (user_id, twilio_call_sid, caller_phone, status, is_missed, followup_status, receptionist_status, handled_by_ai)
+     VALUES ($1, $2, $3, 'no-answer', true, 'pending', 'pending', false)
      RETURNING id`,
     [userId, callSid, callerPhone]
   );
@@ -170,9 +171,9 @@ async function processMissedCall(userId, callerPhone, settings, callSid = null, 
     [userId, callId, conversationId, callerPhone]
   );
 
-  // Get SMS message
+  // SMS MESSAGE - Simple classification, both options result in callback
   const followUpMessage = settings.ai_greeting ||
-    `Hi! This is ${practiceName}. We missed your call and want to help you.\n\nReply:\n1 - Request a callback\n2 - Book an appointment`;
+    `Hi! This is ${practiceName}. We missed your call.\n\nReply 1 for appointment or 2 for other. We'll call you back shortly.`;
 
   // Send SMS with retry
   const fromNumber = settings.sms_reply_number || process.env.VONAGE_FROM_NUMBER;

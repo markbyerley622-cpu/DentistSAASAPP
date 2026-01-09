@@ -1,18 +1,17 @@
 /**
  * SMS Routes - Vonage Two-Way SMS Integration
- * Handles inbound SMS webhooks and conversational booking flow
+ * Handles inbound SMS webhooks and callback classification flow
+ *
+ * SIMPLIFIED FLOW (V2):
+ * - Reply 1 = Appointment request callback
+ * - Reply 2 = Other/general callback
+ * - Both result in callbacks - we're just classifying intent for reporting
  *
  * Security Features:
  * - Signature validation (HMAC-SHA256)
  * - Per-phone rate limiting
  * - Idempotency protection
  * - Input sanitization
- *
- * Production Features:
- * - Structured logging
- * - Retry with exponential backoff
- * - Delivery tracking
- * - Error monitoring (Sentry)
  */
 
 const express = require('express');
@@ -112,7 +111,7 @@ async function handleInboundSMS(req, res) {
     let conversationResult = await query(
       `SELECT * FROM conversations
        WHERE user_id = $1 AND caller_phone = $2
-         AND status NOT IN ('completed', 'appointment_booked')
+         AND status NOT IN ('completed', 'callback_confirmed')
        ORDER BY created_at DESC LIMIT 1`,
       [userId, callerPhone]
     );
@@ -295,17 +294,18 @@ router.get('/health', (req, res) => {
 });
 
 // ============================================
-// CONVERSATION STATE MACHINE
+// SIMPLIFIED CONVERSATION STATE MACHINE
 // ============================================
 
 /**
- * Main conversation handler - numeric-only state machine
+ * Main conversation handler - SIMPLIFIED for callback classification only
+ *
  * States:
- * - awaiting_initial_choice: User picks 1 (callback) or 2 (appointment)
- * - awaiting_slot_confirmation: Confirm offered slot (1=yes, 2=more options)
- * - awaiting_slot_selection: Choose from multiple slots (1,2,3,4)
- * - callback_requested: Flow complete - callback requested
- * - appointment_booked: Flow complete - appointment booked
+ * - awaiting_initial_choice: User picks 1 (appointment callback) or 2 (other callback)
+ * - callback_pending: Intent classified, waiting for receptionist to call back
+ * - callback_confirmed: Flow complete - receptionist marked as done
+ *
+ * NO APPOINTMENT BOOKING - both options result in callbacks
  */
 async function handleConversation(conversationId, incomingMessage, settings, conversation) {
   const practiceName = settings.practice_name || 'Our Practice';
@@ -325,186 +325,101 @@ async function handleConversation(conversationId, incomingMessage, settings, con
     return `You've been unsubscribed. Reply START to opt back in. Contact ${practiceName} directly if you need help.`;
   }
 
-  // Handle opt-in
+  // Handle opt-in / restart
   if (['start', 'subscribe', 'hi', 'hello'].includes(input)) {
     await updateConversationStatus(conversationId, 'awaiting_initial_choice', {});
-    return `Hi! Thanks for contacting ${practiceName}.\n\nReply:\n1 - Request a callback\n2 - Book an appointment`;
+    return `Hi! This is ${practiceName}. We missed your call and want to make sure we help you.\n\nReply 1 if this is about an appointment, or 2 for another reason. We'll call you back shortly.`;
   }
 
   // Handle help
   if (['help', 'info', '?'].includes(input)) {
-    return `${practiceName} SMS Booking:\n\n1 - Request a callback\n2 - Book an appointment\n\nReply STOP to opt out.`;
+    return `${practiceName} Missed Call Follow-up:\n\nReply 1 - Appointment request\nReply 2 - Other enquiry\n\nWe'll call you back shortly.\n\nReply STOP to opt out.`;
   }
 
   // Process based on current state
   switch (currentStatus) {
     case 'active':
     case 'awaiting_initial_choice': {
-      // First response - user picks 1 or 2
-      if (trimmed === '1' || input === 'one' || input.includes('callback') || input.includes('call me')) {
-        await updateConversationStatus(conversationId, 'callback_requested', { intent: 'callback' });
+      // Reply 1 = Appointment request callback
+      if (trimmed === '1' || input === 'one' || input.includes('appointment') || input.includes('book')) {
+        await classifyCallbackType(conversationId, 'appointment_request');
+        return `Thank you! We received your request and will be in contact shortly. - ${practiceName}`;
+      }
+
+      // Reply 2 = General/other callback
+      if (trimmed === '2' || input === 'two' || input.includes('other') || input.includes('question')) {
+        await classifyCallbackType(conversationId, 'general_callback');
+        return `Thank you! We received your request and will be in contact shortly. - ${practiceName}`;
+      }
+
+      // Handle any number as a valid response - classify as general
+      const numericInput = parseInt(trimmed);
+      if (!isNaN(numericInput)) {
+        await classifyCallbackType(conversationId, 'general_callback');
+        return `Thank you! We received your request and will be in contact shortly. - ${practiceName}`;
+      }
+
+      // If they send any text message, just classify as general and confirm
+      if (trimmed.length > 0) {
+        // Store their message as a note
         await query(
-          `UPDATE leads SET status = 'qualified', preferred_time = 'Callback requested' WHERE conversation_id = $1`,
-          [conversationId]
+          `UPDATE leads SET notes = $1 WHERE conversation_id = $2`,
+          [incomingMessage, conversationId]
         );
-        return `Got it! Someone from ${practiceName} will call you back as soon as possible. Is there anything specific you'd like us to know?`;
+        await classifyCallbackType(conversationId, 'general_callback');
+        return `Thank you! We received your request and will be in contact shortly. - ${practiceName}`;
       }
 
-      if (trimmed === '2' || input === 'two' || input.includes('book') || input.includes('appointment')) {
-        // Get available slots
-        const slots = await getAvailableSlots(settings.user_id, settings.business_hours, 3);
-
-        if (slots.length === 0) {
-          await updateConversationStatus(conversationId, 'callback_requested', { intent: 'appointment_no_slots' });
-          await query(
-            `UPDATE leads SET status = 'qualified', preferred_time = 'No slots available' WHERE conversation_id = $1`,
-            [conversationId]
-          );
-          return `We're currently fully booked. Someone from ${practiceName} will call you to find a time that works.`;
-        }
-
-        // Offer first available slot
-        const firstSlot = slots[0];
-        const formattedSlot = formatSlotForSMS(firstSlot);
-
-        await updateConversationStatus(conversationId, 'awaiting_slot_confirmation', {
-          intent: 'appointment',
-          suggestedSlots: slots.map(s => s.toISOString()),
-          currentSlotIndex: 0
-        });
-
-        return `Great! Our next available slot is:\n\n${formattedSlot}\n\nReply:\n1 - Book this time\n2 - See more options`;
-      }
-
-      // Didn't understand - prompt again
-      return `Please reply:\n\n1 - Request a callback\n2 - Book an appointment`;
+      return `Please reply 1 for appointment or 2 for other. We'll call you back shortly.`;
     }
 
-    case 'awaiting_slot_confirmation': {
-      const suggestedSlots = (stateData.suggestedSlots || []).map(s => new Date(s));
-      const currentIndex = stateData.currentSlotIndex || 0;
-
-      if (trimmed === '1' || input === 'yes' || input === 'book') {
-        // Book the current slot
-        const selectedSlot = suggestedSlots[currentIndex];
-        if (!selectedSlot) {
-          await updateConversationStatus(conversationId, 'awaiting_initial_choice', {});
-          return `Sorry, something went wrong. Please reply 2 to try booking again.`;
-        }
-
-        const bookingResult = await bookAppointment(conversationId, selectedSlot, settings);
-
-        if (bookingResult.success) {
-          return `BOOKED! Your appointment at ${practiceName} is confirmed for:\n\n${formatSlotForSMS(selectedSlot)}\n\nSee you then!`;
-        } else {
-          // Slot was taken - offer alternative
-          const newSlots = await getAvailableSlots(settings.user_id, settings.business_hours, 3);
-          if (newSlots.length > 0) {
-            await updateConversationStatus(conversationId, 'awaiting_slot_confirmation', {
-              ...stateData,
-              suggestedSlots: newSlots.map(s => s.toISOString()),
-              currentSlotIndex: 0
-            });
-            return `Sorry, that time was just booked! Next available:\n\n${formatSlotForSMS(newSlots[0])}\n\nReply:\n1 - Book this time\n2 - See more options`;
-          } else {
-            await updateConversationStatus(conversationId, 'callback_requested', { intent: 'appointment_conflict' });
-            return `Sorry, we're now fully booked. Someone will call you to schedule.`;
-          }
-        }
-      }
-
-      if (trimmed === '2' || input === 'more' || input === 'other') {
-        // Show more options
-        if (suggestedSlots.length <= 1) {
-          // No more options - get fresh slots
-          const newSlots = await getAvailableSlots(settings.user_id, settings.business_hours, 4);
-          if (newSlots.length <= 1) {
-            await updateConversationStatus(conversationId, 'callback_requested', { intent: 'no_suitable_slots' });
-            return `We don't have many openings right now. Someone from ${practiceName} will call you to find a time.`;
-          }
-
-          await updateConversationStatus(conversationId, 'awaiting_slot_selection', {
-            ...stateData,
-            suggestedSlots: newSlots.map(s => s.toISOString())
-          });
-
-          const slotList = newSlots.slice(0, 4).map((s, i) => `${i + 1} - ${formatSlotForSMS(s)}`).join('\n');
-          return `Available times:\n\n${slotList}\n\nReply with the number of your preferred time.`;
-        }
-
-        // Move to selection mode with existing slots
-        await updateConversationStatus(conversationId, 'awaiting_slot_selection', stateData);
-
-        const slotList = suggestedSlots.slice(0, 4).map((s, i) => `${i + 1} - ${formatSlotForSMS(s)}`).join('\n');
-        return `Available times:\n\n${slotList}\n\nReply with the number of your preferred time.`;
-      }
-
-      return `Please reply:\n1 - Book this time\n2 - See more options`;
-    }
-
-    case 'awaiting_slot_selection': {
-      const suggestedSlots = (stateData.suggestedSlots || []).map(s => new Date(s));
-      const selection = parseInt(trimmed);
-
-      if (selection >= 1 && selection <= suggestedSlots.length) {
-        const selectedSlot = suggestedSlots[selection - 1];
-        const bookingResult = await bookAppointment(conversationId, selectedSlot, settings);
-
-        if (bookingResult.success) {
-          return `BOOKED! Your appointment at ${practiceName} is confirmed for:\n\n${formatSlotForSMS(selectedSlot)}\n\nSee you then!`;
-        } else {
-          const newSlots = await getAvailableSlots(settings.user_id, settings.business_hours, 4);
-          if (newSlots.length > 0) {
-            await updateConversationStatus(conversationId, 'awaiting_slot_selection', {
-              ...stateData,
-              suggestedSlots: newSlots.map(s => s.toISOString())
-            });
-            const slotList = newSlots.slice(0, 4).map((s, i) => `${i + 1} - ${formatSlotForSMS(s)}`).join('\n');
-            return `Sorry, that time was taken! Updated options:\n\n${slotList}\n\nReply with your choice.`;
-          } else {
-            await updateConversationStatus(conversationId, 'callback_requested', {});
-            return `Sorry, we're now fully booked. Someone will call you.`;
-          }
-        }
-      }
-
-      // Handle "4" for more options or callback request
-      if (trimmed === '4' || input.includes('call') || input.includes('other')) {
-        await updateConversationStatus(conversationId, 'callback_requested', { intent: 'different_time' });
-        await query(
-          `UPDATE leads SET status = 'qualified', preferred_time = 'Requested different time' WHERE conversation_id = $1`,
-          [conversationId]
-        );
-        return `No problem! Someone from ${practiceName} will call you to find a better time.`;
-      }
-
-      const slotList = suggestedSlots.slice(0, 4).map((s, i) => `${i + 1} - ${formatSlotForSMS(s)}`).join('\n');
-      return `Please reply with a number:\n\n${slotList}\n\nOr reply CALL ME for a callback.`;
-    }
-
-    case 'callback_requested': {
-      // Already requested callback - acknowledge any follow-up
-      if (input.includes('thank')) {
-        return `You're welcome! ${practiceName} will be in touch soon.`;
-      }
-      await query(
-        `UPDATE leads SET notes = COALESCE(notes, '') || E'\n' || $1 WHERE conversation_id = $2`,
-        [`Patient note: ${incomingMessage}`, conversationId]
-      );
-      return `Thanks for the info! We've noted it down. Someone will call you soon.`;
-    }
-
-    case 'appointment_booked': {
-      if (input.includes('cancel') || input.includes('change') || input.includes('reschedule')) {
-        return `To change your appointment, please call ${practiceName} directly or reply CALL ME and we'll reach out.`;
-      }
-      return `Thanks for your message! You have an appointment scheduled. Is there anything else we can help with?`;
+    case 'callback_pending':
+    case 'callback_confirmed':
+    case 'completed': {
+      // Already handled - simple acknowledgment
+      return `Thanks for your message! We'll be in contact shortly. - ${practiceName}`;
     }
 
     default:
+      // Unknown state - reset to initial
       await updateConversationStatus(conversationId, 'awaiting_initial_choice', {});
-      return `Hi! Thanks for contacting ${practiceName}.\n\nReply:\n1 - Request a callback\n2 - Book an appointment`;
+      return `Hi! This is ${practiceName}. We missed your call.\n\nReply 1 for appointment or 2 for other. We'll call you back shortly.`;
   }
+}
+
+/**
+ * Classify the callback type and update all relevant records
+ */
+async function classifyCallbackType(conversationId, callbackType) {
+  // Update conversation status
+  await updateConversationStatus(conversationId, 'callback_pending', {
+    callbackType,
+    classifiedAt: new Date().toISOString()
+  });
+
+  // Update the call record with callback_type
+  await query(
+    `UPDATE calls
+     SET callback_type = $1, handled_by_ai = true
+     WHERE id = (SELECT call_id FROM conversations WHERE id = $2)`,
+    [callbackType, conversationId]
+  );
+
+  // Update lead with callback type and status
+  const preferredTime = callbackType === 'appointment_request'
+    ? 'Callback requested (appointment)'
+    : 'Callback requested (other)';
+
+  await query(
+    `UPDATE leads
+     SET status = 'qualified',
+         callback_type = $1,
+         preferred_time = $2
+     WHERE conversation_id = $3`,
+    [callbackType, preferredTime, conversationId]
+  );
+
+  log.info({ conversationId, callbackType }, 'Callback classified');
 }
 
 /**
@@ -517,220 +432,6 @@ async function updateConversationStatus(conversationId, status, stateData) {
      WHERE id = $3`,
     [status, JSON.stringify(stateData), conversationId]
   );
-}
-
-/**
- * Get available appointment slots - OPTIMIZED
- * Queries all existing appointments in date range first, then filters in memory
- */
-async function getAvailableSlots(userId, businessHours, numSlots = 3) {
-  const now = new Date();
-  const maxDays = 14;
-
-  // Default business hours if not set
-  const defaultHours = {
-    monday: { enabled: true, open: '09:00', close: '17:00' },
-    tuesday: { enabled: true, open: '09:00', close: '17:00' },
-    wednesday: { enabled: true, open: '09:00', close: '17:00' },
-    thursday: { enabled: true, open: '09:00', close: '17:00' },
-    friday: { enabled: true, open: '09:00', close: '17:00' },
-    saturday: { enabled: false },
-    sunday: { enabled: false }
-  };
-
-  const hours = businessHours && Object.keys(businessHours).length > 0 ? businessHours : defaultHours;
-  const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-
-  // Calculate date range
-  const startDate = now.toISOString().split('T')[0];
-  const endDate = new Date(now.getTime() + maxDays * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-
-  // Fetch ALL existing appointments in range (single query instead of N queries)
-  const existingAppointments = await query(
-    `SELECT appointment_date, appointment_time
-     FROM appointments
-     WHERE user_id = $1
-       AND appointment_date BETWEEN $2 AND $3
-       AND status NOT IN ('cancelled', 'no_show')`,
-    [userId, startDate, endDate]
-  );
-
-  // Create a Set of booked slots for O(1) lookup
-  const bookedSlots = new Set(
-    existingAppointments.rows.map(row => {
-      const date = row.appointment_date instanceof Date
-        ? row.appointment_date.toISOString().split('T')[0]
-        : row.appointment_date;
-      return `${date}T${row.appointment_time}`;
-    })
-  );
-
-  // Generate available slots
-  const availableSlots = [];
-  let checkDate = new Date(now);
-
-  while (availableSlots.length < numSlots && checkDate <= new Date(endDate)) {
-    const dayName = dayNames[checkDate.getDay()];
-    const dayConfig = hours[dayName];
-
-    if (dayConfig?.enabled) {
-      const [openHour, openMin] = dayConfig.open.split(':').map(Number);
-      const [closeHour, closeMin] = dayConfig.close.split(':').map(Number);
-
-      // Start from opening time (or current time + 1 hour if today)
-      let slotTime = new Date(checkDate);
-      slotTime.setHours(openHour, openMin, 0, 0);
-
-      const closeTime = new Date(checkDate);
-      closeTime.setHours(closeHour, closeMin, 0, 0);
-
-      const isToday = checkDate.toDateString() === now.toDateString();
-      const minTime = isToday ? new Date(now.getTime() + 60 * 60 * 1000) : slotTime;
-
-      while (slotTime < closeTime && availableSlots.length < numSlots) {
-        if (slotTime >= minTime) {
-          const slotDate = slotTime.toISOString().split('T')[0];
-          const slotTimeStr = slotTime.toTimeString().slice(0, 5);
-          const slotKey = `${slotDate}T${slotTimeStr}`;
-
-          if (!bookedSlots.has(slotKey)) {
-            availableSlots.push(new Date(slotTime));
-          }
-        }
-        slotTime = new Date(slotTime.getTime() + 30 * 60 * 1000); // 30-minute slots
-      }
-    }
-
-    checkDate.setDate(checkDate.getDate() + 1);
-    checkDate.setHours(0, 0, 0, 0);
-  }
-
-  return availableSlots;
-}
-
-/**
- * Book an appointment with proper transaction handling
- * Uses SERIALIZABLE isolation to prevent double-booking
- */
-async function bookAppointment(conversationId, slotTime, settings) {
-  const client = await getClient();
-
-  try {
-    await client.query('BEGIN');
-    await client.query('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE');
-
-    const appointmentDate = slotTime.toISOString().split('T')[0];
-    const appointmentTime = slotTime.toTimeString().slice(0, 5);
-
-    // Check for conflict with row lock
-    const conflict = await client.query(
-      `SELECT id FROM appointments
-       WHERE user_id = $1
-         AND appointment_date = $2
-         AND appointment_time = $3
-         AND status NOT IN ('cancelled', 'no_show')
-       FOR UPDATE`,
-      [settings.user_id, appointmentDate, appointmentTime]
-    );
-
-    if (conflict.rows.length > 0) {
-      await client.query('ROLLBACK');
-      log.warn({ appointmentDate, appointmentTime }, 'Slot conflict detected');
-      return { success: false, reason: 'slot_taken' };
-    }
-
-    // Get conversation details for appointment
-    const convResult = await client.query(
-      `SELECT c.caller_phone, l.id as lead_id, l.name as lead_name
-       FROM conversations c
-       LEFT JOIN leads l ON l.conversation_id = c.id
-       WHERE c.id = $1`,
-      [conversationId]
-    );
-
-    const conv = convResult.rows[0];
-    if (!conv) {
-      await client.query('ROLLBACK');
-      return { success: false, reason: 'conversation_not_found' };
-    }
-
-    // Create appointment
-    const appointmentResult = await client.query(
-      `INSERT INTO appointments (user_id, lead_id, conversation_id, patient_name, patient_phone, appointment_date, appointment_time, status, reason)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'scheduled', 'SMS Booking')
-       RETURNING id`,
-      [settings.user_id, conv.lead_id, conversationId, conv.lead_name || 'SMS Booking', conv.caller_phone, appointmentDate, appointmentTime]
-    );
-
-    const appointmentId = appointmentResult.rows[0].id;
-
-    // Update conversation
-    await client.query(
-      `UPDATE conversations SET status = 'appointment_booked', state_data = $1 WHERE id = $2`,
-      [JSON.stringify({ appointmentId, bookedAt: new Date().toISOString() }), conversationId]
-    );
-
-    // Update lead
-    const formattedTime = slotTime.toLocaleString('en-AU', {
-      weekday: 'short',
-      day: 'numeric',
-      month: 'short',
-      hour: 'numeric',
-      minute: '2-digit',
-      hour12: true
-    });
-
-    await client.query(
-      `UPDATE leads
-       SET status = 'converted',
-           appointment_booked = true,
-           appointment_time = $1,
-           appointment_id = $2
-       WHERE conversation_id = $3`,
-      [slotTime.toISOString(), appointmentId, conversationId]
-    );
-
-    await client.query('COMMIT');
-
-    log.info({
-      conversationId,
-      appointmentId,
-      appointmentDate,
-      appointmentTime
-    }, 'Appointment booked successfully');
-
-    return { success: true, appointmentId };
-
-  } catch (error) {
-    await client.query('ROLLBACK');
-
-    if (error.code === '40001') {
-      // Serialization failure - concurrent booking
-      log.warn({ conversationId, error: error.message }, 'Serialization conflict');
-      return { success: false, reason: 'concurrent_booking' };
-    }
-
-    log.error({ conversationId, error: error.message }, 'Booking failed');
-    captureException(error, { context: 'book_appointment', conversationId });
-    return { success: false, reason: 'error' };
-
-  } finally {
-    client.release();
-  }
-}
-
-/**
- * Format a slot for SMS display
- */
-function formatSlotForSMS(slot) {
-  return slot.toLocaleString('en-AU', {
-    weekday: 'long',
-    day: 'numeric',
-    month: 'short',
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true
-  });
 }
 
 module.exports = router;
