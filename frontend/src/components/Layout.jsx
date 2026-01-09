@@ -4,7 +4,7 @@ import { useAuth } from '../context/AuthContext'
 import {
   LayoutDashboard,
   PhoneMissed,
-  Users,
+  History,
   Settings,
   LogOut,
   ChevronLeft,
@@ -17,7 +17,7 @@ import {
 
 const navigation = [
   { name: 'Missed Calls', href: '/missed-calls', icon: PhoneMissed },
-  { name: 'Follow-Ups', href: '/leads', icon: Users },
+  { name: 'History', href: '/leads', icon: History },
   { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
   { name: 'Settings', href: '/settings', icon: Settings },
 ]

@@ -33,9 +33,14 @@ function formatAppointmentTime(dateString) {
   })
 }
 
-// Beautiful status badges with clear meaning
+// Status badges with color coding:
+// - Green: Booked / Handled
+// - Purple: Wants callback or appointment
+// - Yellow: Replied / Waiting
+// - Grey: No response (45+ min)
+// - Neutral: Initial SMS sending
 function CallStatus({ call }) {
-  // BOOKED = They're coming in!
+  // BOOKED = Green - They're coming in!
   if (call.appointmentBooked && call.appointmentTime) {
     return (
       <div className="flex items-center gap-3">
@@ -50,7 +55,7 @@ function CallStatus({ call }) {
     )
   }
 
-  // BOOKED but no time (fallback)
+  // BOOKED but no time (fallback) = Green
   if (call.appointmentBooked) {
     return (
       <div className="flex items-center gap-3">
@@ -65,7 +70,7 @@ function CallStatus({ call }) {
     )
   }
 
-  // WANTS CALLBACK - check preferredTime contains "callback"
+  // WANTS CALLBACK = Purple
   if (call.preferredTime?.toLowerCase().includes('callback') || call.leadStatus === 'qualified') {
     return (
       <div className="flex items-center gap-3">
@@ -80,22 +85,22 @@ function CallStatus({ call }) {
     )
   }
 
-  // REPLIED = They texted back
+  // HANDLED = Green (manually marked as done)
   if (call.followupStatus === 'completed') {
     return (
       <div className="flex items-center gap-3">
-        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-accent-500/20 to-accent-600/20 flex items-center justify-center ring-1 ring-accent-500/30">
-          <CheckCircle2 className="w-5 h-5 text-accent-400" />
+        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-success-500/20 to-success-600/20 flex items-center justify-center ring-1 ring-success-500/30">
+          <CheckCircle2 className="w-5 h-5 text-success-400" />
         </div>
         <div>
-          <p className="text-sm font-semibold text-accent-400">Replied</p>
-          <p className="text-xs text-accent-400/60">Check Follow-Ups</p>
+          <p className="text-sm font-semibold text-success-400">Handled</p>
+          <p className="text-xs text-success-400/60">In History</p>
         </div>
       </div>
     )
   }
 
-  // WAITING = SMS sent, fingers crossed
+  // WAITING = Yellow - SMS sent, waiting for reply
   if (call.followupStatus === 'in_progress' || call.followupStatus === 'in-progress') {
     return (
       <div className="flex items-center gap-3">
@@ -104,75 +109,49 @@ function CallStatus({ call }) {
         </div>
         <div>
           <p className="text-sm font-semibold text-warning-400">Waiting</p>
-          <p className="text-xs text-warning-400/60">Follow-up sent</p>
+          <p className="text-xs text-warning-400/60">SMS sent</p>
         </div>
       </div>
     )
   }
 
-  // CALL THEM = No response, needs attention
+  // NO RESPONSE = Grey - 45+ minutes, no reply
   if (call.followupStatus === 'no_response') {
     return (
       <div className="flex items-center gap-3">
-        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-danger-500/20 to-danger-600/20 flex items-center justify-center ring-1 ring-danger-500/30 animate-pulse">
-          <Phone className="w-5 h-5 text-danger-400" />
+        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-dark-600/40 to-dark-700/40 flex items-center justify-center ring-1 ring-dark-500/30">
+          <PhoneMissed className="w-5 h-5 text-dark-400" />
         </div>
         <div>
-          <p className="text-sm font-semibold text-danger-400">Call Them</p>
-          <p className="text-xs text-danger-400/60">No reply to SMS</p>
+          <p className="text-sm font-semibold text-dark-300">No Response</p>
+          <p className="text-xs text-dark-500">45+ min, no reply</p>
         </div>
       </div>
     )
   }
 
-  // SENDING = Going out now
+  // SENDING = Neutral - Initial SMS going out
   return (
     <div className="flex items-center gap-3">
-      <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-dark-700 to-dark-800 flex items-center justify-center ring-1 ring-dark-600">
-        <Sparkles className="w-5 h-5 text-dark-400" />
+      <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-accent-500/20 to-accent-600/20 flex items-center justify-center ring-1 ring-accent-500/30">
+        <Sparkles className="w-5 h-5 text-accent-400" />
       </div>
       <div>
-        <p className="text-sm font-semibold text-dark-300">Sending</p>
-        <p className="text-xs text-dark-500">SMS follow-up sending</p>
+        <p className="text-sm font-semibold text-accent-400">Sending</p>
+        <p className="text-xs text-accent-400/60">Initial SMS</p>
       </div>
     </div>
   )
 }
 
-// Beautiful call button with Mark as Done
+// Mark as Done button only
 function ActionButton({ call, onMarkDone, isMarking }) {
+  // Don't show button if already booked or handled
   if (call.appointmentBooked || call.followupStatus === 'completed') {
     return null
   }
 
-  if (call.followupStatus === 'no_response') {
-    return (
-      <div className="flex items-center gap-2">
-        <button
-          onClick={(e) => {
-            e.stopPropagation()
-            onMarkDone(call.id)
-          }}
-          disabled={isMarking}
-          className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-dark-700 hover:bg-dark-600 text-dark-300 hover:text-success-400 text-sm transition-all"
-          title="Mark as done"
-        >
-          <Check className="w-4 h-4" />
-          <span className="hidden sm:inline">Done</span>
-        </button>
-        <a
-          href={`tel:${call.callerPhone}`}
-          onClick={(e) => e.stopPropagation()}
-          className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-danger-500 to-danger-600 hover:from-danger-600 hover:to-danger-700 text-white font-semibold text-sm shadow-lg shadow-danger-500/25 hover:shadow-danger-500/40 transition-all hover:scale-105"
-        >
-          <Phone className="w-4 h-4" />
-          Call Now
-        </a>
-      </div>
-    )
-  }
-
-  // For waiting status, also show mark as done
+  // Show Done button for all other statuses
   return (
     <button
       onClick={(e) => {
@@ -280,24 +259,27 @@ function CallDetailModal({ call, onClose }) {
 }
 
 // Call card component - shows WHO / WHAT / WHEN / WHY / STATUS
+// Colors: Green=booked/handled, Purple=wants callback, Yellow=waiting, Grey=no response
 function CallCard({ call, onClick, formatTime, onMarkDone, isMarking }) {
   // Determine what they want
   const wantsCallback = call.preferredTime?.toLowerCase().includes('callback') || call.leadStatus === 'qualified'
   const hasAppointment = call.appointmentBooked && call.appointmentTime
 
-  // Get the border color based on priority
+  // Get the border color based on status
   const getBorderColor = () => {
-    if (call.followupStatus === 'no_response') return 'border-danger-500/30 hover:border-danger-500/50'
+    if (call.appointmentBooked || call.followupStatus === 'completed') return 'border-success-500/30 hover:border-success-500/50'
     if (wantsCallback) return 'border-purple-500/30 hover:border-purple-500/50'
-    if (call.appointmentBooked) return 'border-success-500/30 hover:border-success-500/50'
-    return 'border-dark-700/50 hover:border-dark-600'
+    if (call.followupStatus === 'in_progress' || call.followupStatus === 'in-progress') return 'border-warning-500/30 hover:border-warning-500/50'
+    if (call.followupStatus === 'no_response') return 'border-dark-500/30 hover:border-dark-400/50'
+    return 'border-accent-500/30 hover:border-accent-500/50'
   }
 
   const getBackgroundColor = () => {
-    if (call.followupStatus === 'no_response') return 'bg-gradient-to-r from-danger-500/10 to-danger-500/5'
+    if (call.appointmentBooked || call.followupStatus === 'completed') return 'bg-gradient-to-r from-success-500/10 to-success-500/5'
     if (wantsCallback) return 'bg-gradient-to-r from-purple-500/10 to-purple-500/5'
-    if (call.appointmentBooked) return 'bg-gradient-to-r from-success-500/10 to-success-500/5'
-    return 'bg-dark-800/30 hover:bg-dark-800/50'
+    if (call.followupStatus === 'in_progress' || call.followupStatus === 'in-progress') return 'bg-gradient-to-r from-warning-500/10 to-warning-500/5'
+    if (call.followupStatus === 'no_response') return 'bg-gradient-to-r from-dark-700/30 to-dark-700/20'
+    return 'bg-gradient-to-r from-accent-500/10 to-accent-500/5'
   }
 
   return (
