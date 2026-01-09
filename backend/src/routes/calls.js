@@ -43,13 +43,45 @@ router.get('/', async (req, res) => {
     const { page = 1, limit = 20, status, search, startDate, endDate, recentOnly } = req.query;
     const offset = (page - 1) * limit;
 
+    // Auto-flag calls as 'no_response' if they've been pending/in_progress for 45+ minutes
+    // This runs on each fetch to keep status current without needing a separate job
+    await query(
+      `UPDATE calls
+       SET followup_status = 'no_response'
+       WHERE user_id = $1
+         AND followup_status IN ('pending', 'in_progress')
+         AND created_at < NOW() - INTERVAL '45 minutes'
+         AND id NOT IN (
+           SELECT DISTINCT c.id FROM calls c
+           JOIN conversations conv ON conv.call_id = c.id
+           JOIN messages m ON m.conversation_id = conv.id
+           WHERE m.sender = 'patient' AND c.user_id = $1
+         )`,
+      [userId]
+    );
+
+    // Also update leads to 'lost' (No Response) for stale conversations
+    await query(
+      `UPDATE leads
+       SET status = 'lost'
+       WHERE user_id = $1
+         AND status = 'new'
+         AND created_at < NOW() - INTERVAL '45 minutes'
+         AND conversation_id NOT IN (
+           SELECT DISTINCT conv.id FROM conversations conv
+           JOIN messages m ON m.conversation_id = conv.id
+           WHERE m.sender = 'patient' AND conv.user_id = $1
+         )`,
+      [userId]
+    );
+
     let whereClause = 'WHERE c.user_id = $1';
     const params = [userId];
     let paramCount = 1;
 
     // Filter to last 48 hours if recentOnly is true
+    // Note: No paramCount++ here since we're not adding a placeholder parameter
     if (recentOnly === 'true' || recentOnly === '48') {
-      paramCount++;
       whereClause += ` AND c.created_at >= NOW() - INTERVAL '48 hours'`;
     }
 

@@ -14,6 +14,21 @@ router.get('/', async (req, res) => {
     const { page = 1, limit = 20, status, search, priority } = req.query;
     const offset = (page - 1) * limit;
 
+    // Auto-flag leads as 'lost' (No Response) if they've been 'new' for 45+ minutes with no reply
+    await query(
+      `UPDATE leads
+       SET status = 'lost'
+       WHERE user_id = $1
+         AND status = 'new'
+         AND created_at < NOW() - INTERVAL '45 minutes'
+         AND conversation_id NOT IN (
+           SELECT DISTINCT conv.id FROM conversations conv
+           JOIN messages m ON m.conversation_id = conv.id
+           WHERE m.sender = 'patient' AND conv.user_id = $1
+         )`,
+      [userId]
+    );
+
     let whereClause = 'WHERE l.user_id = $1';
     const params = [userId];
     let paramCount = 1;

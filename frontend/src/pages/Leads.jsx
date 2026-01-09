@@ -23,11 +23,25 @@ import {
 } from 'lucide-react'
 
 const STATUS_CONFIG = {
-  new: { label: 'SMS Sent', color: 'accent', icon: UserPlus },
+  new: { label: 'Initial SMS Sent', color: 'accent', icon: UserPlus },
   contacted: { label: 'Replied', color: 'warning', icon: Phone },
-  qualified: { label: 'Wants Callback', color: 'purple', icon: Star },
+  qualified: { label: 'Wants Callback', color: 'purple', icon: PhoneCall },
   converted: { label: 'Booked', color: 'success', icon: CheckCircle },
   lost: { label: 'No Response', color: 'dark', icon: XCircle }
+}
+
+// Format appointment time nicely
+function formatAppointmentTime(dateString) {
+  if (!dateString) return null
+  const date = new Date(dateString)
+  return date.toLocaleDateString('en-AU', {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true
+  })
 }
 
 const PRIORITY_CONFIG = {
@@ -109,7 +123,7 @@ function LeadCard({ lead, onClick }) {
       {lead.status === 'converted' && lead.appointmentTime && (
         <div className="flex items-center gap-2 mb-3 p-2 rounded-lg bg-success-500/10 border border-success-500/20">
           <CalendarCheck className="w-4 h-4 text-success-400" />
-          <span className="text-sm font-medium text-success-400">{lead.appointmentTime}</span>
+          <span className="text-sm font-medium text-success-400">{formatAppointmentTime(lead.appointmentTime)}</span>
         </div>
       )}
 

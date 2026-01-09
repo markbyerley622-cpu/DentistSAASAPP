@@ -568,6 +568,10 @@ async function handleNumericConversation(conversationId, incomingMessage, settin
           }
 
           await updateConversationStatus(conversationId, 'callback_requested');
+          await query(
+            `UPDATE leads SET status = 'qualified', reason = 'Time booked, no alternatives' WHERE conversation_id = $1`,
+            [conversationId]
+          );
           return `Sorry, that time was just booked and we're now fully booked. We'll call you to find a time that works.`;
         }
 
@@ -581,6 +585,10 @@ async function handleNumericConversation(conversationId, incomingMessage, settin
 
         if (slots.length === 0) {
           await updateConversationStatus(conversationId, 'callback_requested');
+          await query(
+            `UPDATE leads SET status = 'qualified', reason = 'No available times' WHERE conversation_id = $1`,
+            [conversationId]
+          );
           return `No more available times in the next few weeks. We'll call you to find a time that works!`;
         }
 
@@ -636,6 +644,10 @@ async function handleNumericConversation(conversationId, incomingMessage, settin
           }
 
           await updateConversationStatus(conversationId, 'callback_requested');
+          await query(
+            `UPDATE leads SET status = 'qualified', reason = 'All slots booked' WHERE conversation_id = $1`,
+            [conversationId]
+          );
           return `Sorry, all those times were just booked. We'll call you to find a time that works!`;
         }
 
@@ -650,6 +662,10 @@ async function handleNumericConversation(conversationId, incomingMessage, settin
         if (newSlots.length === 0) {
           // No more slots - offer callback
           await updateConversationStatus(conversationId, 'callback_requested');
+          await query(
+            `UPDATE leads SET status = 'qualified', reason = 'No more slots available' WHERE conversation_id = $1`,
+            [conversationId]
+          );
           return `No more available times in the next few weeks. We'll call you to find a time that works!\n\nSomeone from ${practiceName} will be in touch soon.`;
         }
 
