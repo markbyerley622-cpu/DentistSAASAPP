@@ -62,7 +62,7 @@ function CallTypeBadge({ callbackType }) {
     return (
       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-purple-500/20 text-purple-300 text-xs font-medium">
         <Calendar className="w-3 h-3" />
-        Appointment
+        Appointment Request
       </span>
     )
   }
@@ -70,14 +70,14 @@ function CallTypeBadge({ callbackType }) {
     return (
       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-blue-500/20 text-blue-300 text-xs font-medium">
         <Phone className="w-3 h-3" />
-        Other
+        General Inquiry
       </span>
     )
   }
   return (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-dark-600 text-dark-400 text-xs font-medium">
       <MessageSquare className="w-3 h-3" />
-      Pending
+      Awaiting Reply
     </span>
   )
 }
