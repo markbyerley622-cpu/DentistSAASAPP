@@ -401,7 +401,7 @@ export default function Leads() {
         <div>
           <h1 className="text-2xl font-bold text-dark-100">Follow-Ups</h1>
           <p className="text-dark-400 mt-1">
-            Patient replies, callbacks, and bookings
+            Complete history of all SMS conversations and bookings
           </p>
         </div>
         <div className="flex items-center gap-3">

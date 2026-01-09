@@ -7,56 +7,98 @@ const router = express.Router();
 // Apply authentication to all routes
 router.use(authenticate);
 
+// Helper: Check if a timestamp falls within business hours
+function isDuringBusinessHours(timestamp, businessHours) {
+  if (!businessHours || Object.keys(businessHours).length === 0) {
+    // No business hours set, assume all calls are during hours
+    return true;
+  }
+
+  const date = new Date(timestamp);
+  const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+  const dayName = days[date.getDay()];
+  const dayConfig = businessHours[dayName];
+
+  // If day is not enabled (closed), it's after hours
+  if (!dayConfig || !dayConfig.enabled) {
+    return false;
+  }
+
+  // Get call time in HH:MM format
+  const hours = date.getHours().toString().padStart(2, '0');
+  const minutes = date.getMinutes().toString().padStart(2, '0');
+  const callTime = `${hours}:${minutes}`;
+
+  // Compare with business hours
+  const openTime = dayConfig.open || '09:00';
+  const closeTime = dayConfig.close || '17:00';
+
+  return callTime >= openTime && callTime < closeTime;
+}
+
 // GET /api/calls - Get all calls for user
 router.get('/', async (req, res) => {
   try {
     const userId = req.user.id;
-    const { page = 1, limit = 20, status, search, startDate, endDate } = req.query;
+    const { page = 1, limit = 20, status, search, startDate, endDate, recentOnly } = req.query;
     const offset = (page - 1) * limit;
 
-    let whereClause = 'WHERE user_id = $1';
+    let whereClause = 'WHERE c.user_id = $1';
     const params = [userId];
     let paramCount = 1;
 
+    // Filter to last 48 hours if recentOnly is true
+    if (recentOnly === 'true' || recentOnly === '48') {
+      paramCount++;
+      whereClause += ` AND c.created_at >= NOW() - INTERVAL '48 hours'`;
+    }
+
     if (status) {
       paramCount++;
-      whereClause += ` AND status = $${paramCount}`;
+      whereClause += ` AND c.status = $${paramCount}`;
       params.push(status);
     }
 
     if (search) {
       paramCount++;
-      whereClause += ` AND (caller_name ILIKE $${paramCount} OR caller_phone ILIKE $${paramCount} OR call_reason ILIKE $${paramCount})`;
+      whereClause += ` AND (c.caller_name ILIKE $${paramCount} OR c.caller_phone ILIKE $${paramCount} OR c.call_reason ILIKE $${paramCount})`;
       params.push(`%${search}%`);
     }
 
     if (startDate) {
       paramCount++;
-      whereClause += ` AND created_at >= $${paramCount}`;
+      whereClause += ` AND c.created_at >= $${paramCount}`;
       params.push(startDate);
     }
 
     if (endDate) {
       paramCount++;
-      whereClause += ` AND created_at <= $${paramCount}`;
+      whereClause += ` AND c.created_at <= $${paramCount}`;
       params.push(endDate);
     }
 
+    // Get business hours for the user
+    const settingsResult = await query(
+      'SELECT business_hours FROM settings WHERE user_id = $1',
+      [userId]
+    );
+    const businessHours = settingsResult.rows[0]?.business_hours || {};
+
     // Get total count
     const countResult = await query(
-      `SELECT COUNT(*) FROM calls ${whereClause}`,
+      `SELECT COUNT(*) FROM calls c ${whereClause}`,
       params
     );
     const total = parseInt(countResult.rows[0].count);
 
     // Get calls
     const result = await query(
-      `SELECT id, twilio_call_sid, caller_phone, caller_name, call_reason, duration,
-              recording_url, transcription, status, sentiment, ai_summary, created_at,
-              followup_status, is_missed
-       FROM calls
+      `SELECT c.id, c.twilio_call_sid, c.caller_phone, c.caller_name, c.call_reason, c.duration,
+              c.recording_url, c.transcription, c.status, c.sentiment, c.ai_summary, c.created_at,
+              c.followup_status, c.is_missed
+       FROM calls c
        ${whereClause}
-       ORDER BY created_at DESC
+       ORDER BY c.created_at DESC
        LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}`,
       [...params, limit, offset]
     );
@@ -76,7 +118,8 @@ router.get('/', async (req, res) => {
         aiSummary: call.ai_summary,
         createdAt: call.created_at,
         followupStatus: call.followup_status,
-        isMissed: call.is_missed
+        isMissed: call.is_missed,
+        isDuringBusinessHours: isDuringBusinessHours(call.created_at, businessHours)
       })),
       pagination: {
         page: parseInt(page),
