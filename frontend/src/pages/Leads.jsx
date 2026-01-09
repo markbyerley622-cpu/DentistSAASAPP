@@ -23,11 +23,11 @@ import {
 } from 'lucide-react'
 
 const STATUS_CONFIG = {
-  new: { label: 'Awaiting Response', color: 'accent', icon: UserPlus },
-  contacted: { label: 'Responded', color: 'warning', icon: Phone },
-  qualified: { label: 'Interested', color: 'purple', icon: Star },
+  new: { label: 'SMS Sent', color: 'accent', icon: UserPlus },
+  contacted: { label: 'Replied', color: 'warning', icon: Phone },
+  qualified: { label: 'Wants Callback', color: 'purple', icon: Star },
   converted: { label: 'Booked', color: 'success', icon: CheckCircle },
-  lost: { label: 'No Answer', color: 'dark', icon: XCircle }
+  lost: { label: 'No Response', color: 'dark', icon: XCircle }
 }
 
 const PRIORITY_CONFIG = {
@@ -399,9 +399,9 @@ export default function Leads() {
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-dark-100">Follow-ups</h1>
+          <h1 className="text-2xl font-bold text-dark-100">Follow-Ups</h1>
           <p className="text-dark-400 mt-1">
-            Track responses and appointment bookings from missed calls
+            Patient replies, callbacks, and bookings
           </p>
         </div>
         <div className="flex items-center gap-3">

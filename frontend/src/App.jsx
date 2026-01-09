@@ -7,7 +7,7 @@ import ForgotPassword from './pages/ForgotPassword'
 import VerifyOTP from './pages/VerifyOTP'
 import ResetPassword from './pages/ResetPassword'
 import Dashboard from './pages/Dashboard'
-import MissedPatients from './pages/MissedPatients'
+import MissedCalls from './pages/MissedCalls'
 import Leads from './pages/Leads'
 import Settings from './pages/Settings'
 import AdminDashboard from './pages/AdminDashboard'
@@ -47,7 +47,7 @@ function PublicRoute({ children }) {
   }
 
   if (user) {
-    return <Navigate to="/dashboard" replace />
+    return <Navigate to="/missed-calls" replace />
   }
 
   return children
@@ -70,7 +70,7 @@ function AdminRoute({ children }) {
   }
 
   if (!user.isAdmin) {
-    return <Navigate to="/dashboard" replace />
+    return <Navigate to="/missed-calls" replace />
   }
 
   return children
@@ -130,10 +130,11 @@ function App() {
           </ProtectedRoute>
         }
       >
-        <Route index element={<Navigate to="/dashboard" replace />} />
+        <Route index element={<Navigate to="/missed-calls" replace />} />
+        <Route path="missed-calls" element={<MissedCalls />} />
+        <Route path="missed-patients" element={<Navigate to="/missed-calls" replace />} />
+        <Route path="calls" element={<Navigate to="/missed-calls" replace />} />
         <Route path="dashboard" element={<Dashboard />} />
-        <Route path="missed-patients" element={<MissedPatients />} />
-        <Route path="calls" element={<Navigate to="/missed-patients" replace />} />
         <Route path="leads" element={<Leads />} />
         <Route path="settings" element={<Settings />} />
         <Route path="admin" element={
@@ -144,7 +145,7 @@ function App() {
       </Route>
 
       {/* 404 */}
-      <Route path="*" element={<Navigate to="/dashboard" replace />} />
+      <Route path="*" element={<Navigate to="/missed-calls" replace />} />
     </Routes>
   )
 }

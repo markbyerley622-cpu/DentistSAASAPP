@@ -16,9 +16,9 @@ import {
 } from 'lucide-react'
 
 const navigation = [
+  { name: 'Missed Calls', href: '/missed-calls', icon: PhoneMissed },
+  { name: 'Follow-Ups', href: '/leads', icon: Users },
   { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-  { name: 'Missed Patients', href: '/missed-patients', icon: PhoneMissed },
-  { name: 'Follow-ups', href: '/leads', icon: Users },
   { name: 'Settings', href: '/settings', icon: Settings },
 ]
 
@@ -40,7 +40,7 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
         {!collapsed && (
           <div className="animate-fade-in">
             <h1 className="font-semibold text-dark-100">SmileDesk</h1>
-            <p className="text-xs text-dark-500">Never miss a patient again</p>
+            <p className="text-xs text-dark-500">Missed Call Recovery</p>
           </div>
         )}
       </div>
