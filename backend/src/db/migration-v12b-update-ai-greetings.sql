@@ -1,33 +1,24 @@
--- Migration v12b: Reset ai_greeting to use dynamic code default
--- This clears custom greetings so the new simplified SMS format is used
--- The code fallback in pbx.js dynamically inserts practice_name
+-- Migration v12b: Update ai_greeting to new simplified SMS format
+-- This sets the new callback-only message for all users
 -- Run this AFTER migration-v12-callback-type.sql
 
 -- ================================================
--- RESET ALL AI GREETINGS TO NULL (uses code default)
+-- UPDATE ALL AI GREETINGS TO NEW FORMAT
 -- ================================================
 
--- Set all ai_greeting to NULL so they use the dynamic default:
--- "Hi! This is {practice_name}. We missed your call.
---  Reply 1 for appointment or 2 for other. We'll call you back shortly."
+-- Update all settings with the new SMS message
+-- Uses practice_name from users table for personalization
+UPDATE settings s
+SET ai_greeting = 'Hi! This is ' || COALESCE(u.practice_name, 'our practice') || '. We missed your call.
 
-UPDATE settings
-SET ai_greeting = NULL,
+Reply 1 for appointment request or 2 for other enquiry. We''ll call you back shortly.',
     updated_at = NOW()
-WHERE ai_greeting IS NOT NULL;
+FROM users u
+WHERE s.user_id = u.id;
 
 -- ================================================
--- The code fallback in pbx.js line 175-176 handles the message:
---
--- const followUpMessage = settings.ai_greeting ||
---   `Hi! This is ${practiceName}. We missed your call.\n\nReply 1 for appointment or 2 for other. We'll call you back shortly.`;
---
--- This ensures:
--- 1. Dynamic practice name from users table
--- 2. Single source of truth for the message template
--- 3. Easy to update in future (just change code)
+-- VERIFICATION
 -- ================================================
 
--- VERIFICATION: Check all settings now use NULL
--- SELECT COUNT(*) as total, COUNT(ai_greeting) as custom FROM settings;
--- Expected: custom = 0
+-- Run this to verify the update:
+-- SELECT u.practice_name, s.ai_greeting FROM settings s JOIN users u ON s.user_id = u.id;

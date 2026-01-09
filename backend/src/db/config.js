@@ -2,18 +2,28 @@ const { Pool } = require('pg');
 
 const isSupabase = process.env.DB_HOST?.includes('supabase') || process.env.DB_HOST?.includes('pooler');
 
-const pool = new Pool({
-  host: process.env.DB_HOST || 'localhost',
-  port: process.env.DB_PORT || 5432,
-  database: process.env.DB_NAME || 'dentistai',
-  user: process.env.DB_USER || 'postgres',
-  password: process.env.DB_PASSWORD,
-  max: 10,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 10000,
-  // Supabase requires SSL
-  ssl: isSupabase ? { rejectUnauthorized: false } : false,
-});
+// Use DATABASE_URL if provided (Supabase connection string), otherwise use individual vars
+const poolConfig = process.env.DATABASE_URL
+  ? {
+      connectionString: process.env.DATABASE_URL,
+      max: 5, // Reduced for serverless
+      idleTimeoutMillis: 20000,
+      connectionTimeoutMillis: 30000, // Increased timeout
+      ssl: { rejectUnauthorized: false }
+    }
+  : {
+      host: process.env.DB_HOST || 'localhost',
+      port: process.env.DB_PORT || 5432,
+      database: process.env.DB_NAME || 'dentistai',
+      user: process.env.DB_USER || 'postgres',
+      password: process.env.DB_PASSWORD,
+      max: 5,
+      idleTimeoutMillis: 20000,
+      connectionTimeoutMillis: 30000,
+      ssl: isSupabase ? { rejectUnauthorized: false } : false,
+    };
+
+const pool = new Pool(poolConfig);
 
 // Test connection on startup
 pool.on('connect', () => {
