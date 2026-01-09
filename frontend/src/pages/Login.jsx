@@ -18,7 +18,7 @@ export default function Login() {
 
     try {
       await login(email, password)
-      navigate('/dashboard')
+      navigate('/missed-calls')
     } catch (err) {
       setError(err.response?.data?.error?.message || 'Failed to sign in')
     } finally {

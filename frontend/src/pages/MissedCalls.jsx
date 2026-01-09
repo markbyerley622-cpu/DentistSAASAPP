@@ -2,8 +2,6 @@ import { useState, useEffect, useCallback } from 'react'
 import { callsAPI } from '../lib/api'
 import {
   Search,
-  ChevronLeft,
-  ChevronRight,
   Phone,
   PhoneMissed,
   Check,
@@ -11,8 +9,6 @@ import {
   Calendar,
   MessageSquare,
   AlertCircle,
-  History,
-  Undo2,
   CheckCircle2
 } from 'lucide-react'
 
@@ -56,13 +52,13 @@ function formatTime(dateString) {
   }) + ` ${time}`
 }
 
-// Call type badge
-function CallTypeBadge({ callbackType }) {
+// Call type badge - simplified for receptionist
+function CallTypeBadge({ callbackType, aiStatus }) {
   if (callbackType === 'appointment_request') {
     return (
       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-purple-500/20 text-purple-300 text-xs font-medium">
         <Calendar className="w-3 h-3" />
-        Appointment Request
+        Appointment Requested
       </span>
     )
   }
@@ -70,14 +66,22 @@ function CallTypeBadge({ callbackType }) {
     return (
       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-blue-500/20 text-blue-300 text-xs font-medium">
         <Phone className="w-3 h-3" />
-        General Inquiry
+        General Enquiry
+      </span>
+    )
+  }
+  if (aiStatus === 'no_response') {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-danger-500/20 text-danger-400 text-xs font-medium">
+        <AlertCircle className="w-3 h-3" />
+        No Response
       </span>
     )
   }
   return (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-dark-600 text-dark-400 text-xs font-medium">
       <MessageSquare className="w-3 h-3" />
-      Awaiting Reply
+      Initial SMS Sent
     </span>
   )
 }
@@ -103,7 +107,7 @@ function AIStatusBadge({ aiStatus }) {
       return (
         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-danger-500/20 text-danger-400 text-xs font-medium">
           <AlertCircle className="w-3 h-3" />
-          No Reply
+          Needs Reply
         </span>
       )
     default:
@@ -117,12 +121,9 @@ function AIStatusBadge({ aiStatus }) {
 }
 
 export default function MissedCalls() {
-  const [activeTab, setActiveTab] = useState('active')
   const [activeCalls, setActiveCalls] = useState([])
-  const [historyCalls, setHistoryCalls] = useState([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
-  const [historyPagination, setHistoryPagination] = useState({ page: 1, totalPages: 1 })
   const [markingIds, setMarkingIds] = useState(new Set())
 
   // Fetch active calls
@@ -155,40 +156,15 @@ export default function MissedCalls() {
     }
   }, [search])
 
-  // Fetch history calls
-  const fetchHistoryCalls = useCallback(async () => {
-    try {
-      const response = await callsAPI.getAll({
-        recentOnly: 'true',
-        limit: 50,
-        page: historyPagination.page,
-        ...(search && { search })
-      })
-
-      // Filter to only done calls
-      const done = response.data.calls.filter(
-        c => c.receptionistStatus === 'done' || c.followupStatus === 'completed'
-      )
-
-      setHistoryCalls(done)
-      setHistoryPagination(prev => ({
-        ...prev,
-        totalPages: Math.ceil(done.length / 50) || 1
-      }))
-    } catch (error) {
-      console.error('Failed to fetch history:', error)
-    }
-  }, [search, historyPagination.page])
-
   // Initial load
   useEffect(() => {
     const load = async () => {
       setLoading(true)
-      await Promise.all([fetchActiveCalls(), fetchHistoryCalls()])
+      await fetchActiveCalls()
       setLoading(false)
     }
     load()
-  }, [fetchActiveCalls, fetchHistoryCalls])
+  }, [fetchActiveCalls])
 
   // Mark call as done - optimistic update
   const handleMarkDone = async (callId) => {
@@ -205,50 +181,11 @@ export default function MissedCalls() {
         receptionistStatus: 'done',
         followupStatus: 'completed'
       })
-
-      // Add to history
-      if (callToMove) {
-        setHistoryCalls(prev => [
-          { ...callToMove, markedDoneAt: new Date().toISOString() },
-          ...prev
-        ])
-      }
     } catch (error) {
       console.error('Failed to mark as done:', error)
       // Rollback: Add back to active
       if (callToMove) {
         setActiveCalls(prev => [callToMove, ...prev])
-      }
-    } finally {
-      setMarkingIds(prev => {
-        const next = new Set(prev)
-        next.delete(callId)
-        return next
-      })
-    }
-  }
-
-  // Undo - move back to active
-  const handleUndo = async (callId) => {
-    if (markingIds.has(callId)) return
-    setMarkingIds(prev => new Set(prev).add(callId))
-
-    const callToMove = historyCalls.find(c => c.id === callId)
-    setHistoryCalls(prev => prev.filter(c => c.id !== callId))
-
-    try {
-      await callsAPI.update(callId, {
-        receptionistStatus: 'pending',
-        followupStatus: 'in_progress'
-      })
-
-      if (callToMove) {
-        setActiveCalls(prev => [{ ...callToMove, receptionistStatus: 'pending' }, ...prev])
-      }
-    } catch (error) {
-      console.error('Failed to undo:', error)
-      if (callToMove) {
-        setHistoryCalls(prev => [callToMove, ...prev])
       }
     } finally {
       setMarkingIds(prev => {
@@ -289,30 +226,6 @@ export default function MissedCalls() {
         </div>
       </div>
 
-      {/* Tabs */}
-      <div className="flex items-center gap-1 p-1 bg-dark-800/50 rounded-lg w-fit">
-        <button
-          onClick={() => setActiveTab('active')}
-          className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
-            activeTab === 'active'
-              ? 'bg-dark-700 text-dark-100'
-              : 'text-dark-400 hover:text-dark-200'
-          }`}
-        >
-          Active ({activeCalls.length})
-        </button>
-        <button
-          onClick={() => setActiveTab('history')}
-          className={`px-4 py-2 rounded-md text-sm font-medium transition-colors flex items-center gap-2 ${
-            activeTab === 'history'
-              ? 'bg-dark-700 text-dark-100'
-              : 'text-dark-400 hover:text-dark-200'
-          }`}
-        >
-          <History className="w-4 h-4" />
-          History
-        </button>
-      </div>
 
       {/* Search */}
       <div className="relative max-w-md">
@@ -334,7 +247,7 @@ export default function MissedCalls() {
             <span className="text-dark-400">Loading...</span>
           </div>
         </div>
-      ) : activeTab === 'active' ? (
+      ) : (
         /* Active Calls Table */
         <div className="bg-dark-800/50 rounded-xl border border-dark-700/50 overflow-hidden">
           {activeCalls.length === 0 ? (
@@ -388,7 +301,7 @@ export default function MissedCalls() {
                       </span>
                     </td>
                     <td className="py-3 px-4 hidden sm:table-cell">
-                      <CallTypeBadge callbackType={call.callbackType} />
+                      <CallTypeBadge callbackType={call.callbackType} aiStatus={call.aiStatus} />
                     </td>
                     <td className="py-3 px-4 hidden md:table-cell">
                       <AIStatusBadge aiStatus={call.aiStatus} />
@@ -407,110 +320,6 @@ export default function MissedCalls() {
                 ))}
               </tbody>
             </table>
-          )}
-        </div>
-      ) : (
-        /* History Table */
-        <div className="bg-dark-800/50 rounded-xl border border-dark-700/50 overflow-hidden">
-          {historyCalls.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-16 px-4">
-              <History className="w-12 h-12 text-dark-600 mb-4" />
-              <p className="text-dark-400">No history yet</p>
-            </div>
-          ) : (
-            <>
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b border-dark-700/50">
-                    <th className="text-left py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider">
-                      Phone
-                    </th>
-                    <th className="text-left py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider">
-                      Missed At
-                    </th>
-                    <th className="text-left py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider hidden sm:table-cell">
-                      Type
-                    </th>
-                    <th className="text-left py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider hidden md:table-cell">
-                      Completed
-                    </th>
-                    <th className="text-right py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider">
-                      Action
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-dark-700/30">
-                  {historyCalls.map((call) => (
-                    <tr
-                      key={call.id}
-                      className="hover:bg-dark-700/30 transition-colors opacity-75"
-                    >
-                      <td className="py-3 px-4">
-                        <div>
-                          <p className="font-medium text-dark-200">
-                            {call.callerName || formatPhone(call.callerPhone)}
-                          </p>
-                          {call.callerName && (
-                            <p className="text-xs text-dark-500 font-mono mt-0.5">
-                              {formatPhone(call.callerPhone)}
-                            </p>
-                          )}
-                        </div>
-                      </td>
-                      <td className="py-3 px-4">
-                        <span className="text-sm text-dark-400">
-                          {formatTime(call.createdAt)}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 hidden sm:table-cell">
-                        <CallTypeBadge callbackType={call.callbackType} />
-                      </td>
-                      <td className="py-3 px-4 hidden md:table-cell">
-                        <span className="text-sm text-dark-500">
-                          {call.markedDoneAt ? formatTime(call.markedDoneAt) : '-'}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 text-right">
-                        <button
-                          onClick={() => handleUndo(call.id)}
-                          disabled={markingIds.has(call.id)}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-dark-700 hover:bg-dark-600 text-dark-300 text-sm transition-colors disabled:opacity-50"
-                          title="Move back to active"
-                        >
-                          <Undo2 className="w-4 h-4" />
-                          Undo
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-
-              {/* History Pagination */}
-              {historyPagination.totalPages > 1 && (
-                <div className="flex items-center justify-between px-4 py-3 border-t border-dark-700/50">
-                  <span className="text-sm text-dark-500">
-                    Page {historyPagination.page} of {historyPagination.totalPages}
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => setHistoryPagination(p => ({ ...p, page: p.page - 1 }))}
-                      disabled={historyPagination.page === 1}
-                      className="p-2 rounded-lg bg-dark-700 text-dark-300 disabled:opacity-40 hover:bg-dark-600 transition-colors"
-                    >
-                      <ChevronLeft className="w-4 h-4" />
-                    </button>
-                    <button
-                      onClick={() => setHistoryPagination(p => ({ ...p, page: p.page + 1 }))}
-                      disabled={historyPagination.page === historyPagination.totalPages}
-                      className="p-2 rounded-lg bg-dark-700 text-dark-300 disabled:opacity-40 hover:bg-dark-600 transition-colors"
-                    >
-                      <ChevronRight className="w-4 h-4" />
-                    </button>
-                  </div>
-                </div>
-              )}
-            </>
           )}
         </div>
       )}
