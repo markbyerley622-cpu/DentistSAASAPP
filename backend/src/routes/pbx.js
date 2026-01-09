@@ -2,19 +2,38 @@
  * PBX Routes - Multi-PBX Missed Call Webhooks
  * Handles missed call notifications from various PBX systems
  *
+ * Architecture: All PBX systems forward missed calls to these webhooks.
+ * We don't integrate with PBX APIs directly - we receive webhook events.
+ *
  * Supported PBX Systems:
- * - 3CX
- * - RingCentral
- * - Vonage (voice)
- * - FreePBX/Asterisk
- * - 8x8
- * - Zoom Phone
- * - Generic webhook
+ *
+ * Tier 1 - Cloud VoIP (Very Common):
+ * - RingCentral    POST /api/pbx/missed-call/ringcentral
+ * - 8x8            POST /api/pbx/missed-call/8x8
+ * - Nextiva        POST /api/pbx/missed-call/nextiva
+ * - Dialpad        POST /api/pbx/missed-call/dialpad
+ * - Zoom Phone     POST /api/pbx/missed-call/zoom
+ * - Vonage Voice   POST /api/pbx/missed-call/vonage
+ * - GoTo Connect   POST /api/pbx/missed-call/goto
+ * - Webex Calling  POST /api/pbx/missed-call/webex
+ *
+ * Tier 2 - Australian Telcos:
+ * - Telstra        POST /api/pbx/missed-call/telstra (TIPT, Business Voice, Hosted PBX)
+ * - Optus          POST /api/pbx/missed-call/optus (Loop, Business Voice)
+ * - BroadSoft      POST /api/pbx/missed-call/broadsoft (MyNetFone, TPG, Symbio, etc.)
+ *
+ * Tier 3 - On-Prem / IT-Managed:
+ * - 3CX            POST /api/pbx/missed-call/3cx
+ * - FreePBX        POST /api/pbx/missed-call/freepbx (Asterisk, Elastix, Issabel)
+ *
+ * Generic (any system):
+ * - Generic        POST /api/pbx/missed-call
  *
  * Security Features:
- * - Rate limiting per IP
- * - Phone number validation
- * - Cooldown to prevent spam
+ * - Rate limiting per IP (200 req/min)
+ * - Phone number validation & normalization
+ * - 30-minute SMS cooldown to prevent spam
+ * - Structured logging for debugging
  */
 
 const express = require('express');
@@ -579,6 +598,430 @@ router.post('/missed-call/zoom', webhookIPLimiter, async (req, res) => {
 });
 
 /**
+ * Nextiva missed call webhook
+ * POST /api/pbx/missed-call/nextiva
+ */
+router.post('/missed-call/nextiva', webhookIPLimiter, async (req, res) => {
+  try {
+    const {
+      callerIdNumber,
+      calledNumber,
+      callId,
+      callResult,
+      direction
+    } = req.body;
+
+    const callerPhone = callerIdNumber || req.body.from;
+    const calledPhone = calledNumber || req.body.to;
+
+    log.info({
+      callerPhone,
+      calledPhone,
+      callResult,
+      source: 'nextiva'
+    }, 'Nextiva webhook');
+
+    if (!callerPhone) {
+      return res.status(400).json({ error: 'Caller number required' });
+    }
+
+    // Nextiva call results: missed, answered, voicemail, busy
+    if (['missed', 'no_answer', 'unanswered'].includes(callResult?.toLowerCase())) {
+      const settings = await findUserByPhone(calledPhone);
+
+      if (!settings) {
+        return res.json({ status: 'ok', action: 'no_user_found' });
+      }
+
+      const result = await processMissedCall(
+        settings.user_id,
+        vonage.normalizePhoneNumber(callerPhone),
+        settings,
+        callId,
+        callResult?.toLowerCase() === 'voicemail'
+      );
+
+      return res.json({ status: 'ok', ...result });
+    }
+
+    return res.json({ status: 'ok', action: 'event_ignored' });
+  } catch (error) {
+    log.error({ error: error.message }, 'Nextiva webhook error');
+    captureException(error, { context: 'pbx_nextiva_webhook' });
+    return res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+/**
+ * Dialpad missed call webhook
+ * POST /api/pbx/missed-call/dialpad
+ */
+router.post('/missed-call/dialpad', webhookIPLimiter, async (req, res) => {
+  try {
+    const {
+      call,
+      event_type
+    } = req.body;
+
+    const data = call || req.body;
+    const callerPhone = data.external_number || data.from_number || data.caller_id;
+    const calledPhone = data.internal_number || data.to_number || data.target_id;
+
+    log.info({
+      callerPhone,
+      calledPhone,
+      event_type,
+      source: 'dialpad'
+    }, 'Dialpad webhook');
+
+    if (!callerPhone) {
+      return res.status(400).json({ error: 'Caller number required' });
+    }
+
+    // Dialpad events: call.missed, call.ended (with state=missed)
+    const isMissed = event_type === 'call.missed' ||
+                     data.state === 'missed' ||
+                     data.disposition === 'missed';
+
+    if (isMissed) {
+      const settings = await findUserByPhone(calledPhone);
+
+      if (!settings) {
+        return res.json({ status: 'ok', action: 'no_user_found' });
+      }
+
+      const result = await processMissedCall(
+        settings.user_id,
+        vonage.normalizePhoneNumber(callerPhone),
+        settings,
+        data.call_id || data.id
+      );
+
+      return res.json({ status: 'ok', ...result });
+    }
+
+    return res.json({ status: 'ok', action: 'event_ignored' });
+  } catch (error) {
+    log.error({ error: error.message }, 'Dialpad webhook error');
+    captureException(error, { context: 'pbx_dialpad_webhook' });
+    return res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+/**
+ * GoTo Connect (formerly Jive) missed call webhook
+ * POST /api/pbx/missed-call/goto
+ */
+router.post('/missed-call/goto', webhookIPLimiter, async (req, res) => {
+  try {
+    const {
+      callerNumber,
+      dialedNumber,
+      callUuid,
+      callResult,
+      eventType
+    } = req.body;
+
+    const callerPhone = callerNumber || req.body.caller || req.body.from;
+    const calledPhone = dialedNumber || req.body.called || req.body.to;
+
+    log.info({
+      callerPhone,
+      calledPhone,
+      callResult,
+      eventType,
+      source: 'goto'
+    }, 'GoTo Connect webhook');
+
+    if (!callerPhone) {
+      return res.status(400).json({ error: 'Caller number required' });
+    }
+
+    // GoTo results: missed, answered, voicemail
+    const isMissed = callResult === 'missed' ||
+                     callResult === 'no_answer' ||
+                     eventType === 'call.missed';
+
+    if (isMissed) {
+      const settings = await findUserByPhone(calledPhone);
+
+      if (!settings) {
+        return res.json({ status: 'ok', action: 'no_user_found' });
+      }
+
+      const result = await processMissedCall(
+        settings.user_id,
+        vonage.normalizePhoneNumber(callerPhone),
+        settings,
+        callUuid
+      );
+
+      return res.json({ status: 'ok', ...result });
+    }
+
+    return res.json({ status: 'ok', action: 'event_ignored' });
+  } catch (error) {
+    log.error({ error: error.message }, 'GoTo Connect webhook error');
+    captureException(error, { context: 'pbx_goto_webhook' });
+    return res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+/**
+ * Webex Calling missed call webhook
+ * POST /api/pbx/missed-call/webex
+ */
+router.post('/missed-call/webex', webhookIPLimiter, async (req, res) => {
+  try {
+    const { data, event } = req.body;
+    const callData = data || req.body;
+
+    const callerPhone = callData.callingParty?.address ||
+                        callData.remoteParty?.number ||
+                        callData.from;
+    const calledPhone = callData.calledParty?.address ||
+                        callData.localParty?.number ||
+                        callData.to;
+
+    log.info({
+      callerPhone,
+      calledPhone,
+      event,
+      source: 'webex'
+    }, 'Webex Calling webhook');
+
+    if (!callerPhone) {
+      return res.status(400).json({ error: 'Caller number required' });
+    }
+
+    // Webex events: callMissed, telephony_calls (with disposition=missed)
+    const isMissed = event === 'callMissed' ||
+                     callData.disposition === 'Missed' ||
+                     callData.callResult === 'missed';
+
+    if (isMissed) {
+      const settings = await findUserByPhone(calledPhone);
+
+      if (!settings) {
+        return res.json({ status: 'ok', action: 'no_user_found' });
+      }
+
+      const result = await processMissedCall(
+        settings.user_id,
+        vonage.normalizePhoneNumber(callerPhone),
+        settings,
+        callData.callId || callData.id
+      );
+
+      return res.json({ status: 'ok', ...result });
+    }
+
+    return res.json({ status: 'ok', action: 'event_ignored' });
+  } catch (error) {
+    log.error({ error: error.message }, 'Webex Calling webhook error');
+    captureException(error, { context: 'pbx_webex_webhook' });
+    return res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+/**
+ * BroadSoft / BroadWorks missed call webhook
+ * Used by: Telstra, Optus, MyNetFone, TPG, and many AU providers
+ * POST /api/pbx/missed-call/broadsoft
+ */
+router.post('/missed-call/broadsoft', webhookIPLimiter, async (req, res) => {
+  try {
+    // BroadWorks Call Event format
+    const {
+      eventType,
+      call,
+      callId,
+      externalTrackingId
+    } = req.body;
+
+    const callData = call || req.body;
+    const callerPhone = callData.remoteParty?.address ||
+                        callData.callingParty ||
+                        callData.from ||
+                        callData.callerNumber;
+    const calledPhone = callData.address ||
+                        callData.calledParty ||
+                        callData.to ||
+                        callData.calledNumber;
+
+    log.info({
+      callerPhone,
+      calledPhone,
+      eventType,
+      source: 'broadsoft'
+    }, 'BroadSoft webhook');
+
+    if (!callerPhone) {
+      return res.status(400).json({ error: 'Caller number required' });
+    }
+
+    // BroadWorks events: Missed, Released (with reason=missed)
+    const isMissed = eventType === 'Missed' ||
+                     eventType === 'CallMissed' ||
+                     callData.releaseReason === 'Missed' ||
+                     callData.disposition === 'missed';
+
+    if (isMissed) {
+      const settings = await findUserByPhone(calledPhone);
+
+      if (!settings) {
+        return res.json({ status: 'ok', action: 'no_user_found' });
+      }
+
+      const result = await processMissedCall(
+        settings.user_id,
+        vonage.normalizePhoneNumber(callerPhone),
+        settings,
+        callId || externalTrackingId
+      );
+
+      return res.json({ status: 'ok', ...result });
+    }
+
+    return res.json({ status: 'ok', action: 'event_ignored' });
+  } catch (error) {
+    log.error({ error: error.message }, 'BroadSoft webhook error');
+    captureException(error, { context: 'pbx_broadsoft_webhook' });
+    return res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+/**
+ * Telstra Business Systems (TIPT, Business Voice, Hosted PBX)
+ * Often use BroadSoft under the hood - alias endpoint
+ * POST /api/pbx/missed-call/telstra
+ */
+router.post('/missed-call/telstra', webhookIPLimiter, async (req, res) => {
+  // Telstra systems typically use BroadSoft/BroadWorks format
+  // Forward to broadsoft handler with source tracking
+  req.body._source = 'telstra';
+  log.info({ source: 'telstra' }, 'Telstra webhook (routing to BroadSoft handler)');
+
+  // Process with same logic as BroadSoft
+  try {
+    const callData = req.body.call || req.body;
+    const callerPhone = callData.remoteParty?.address ||
+                        callData.callingParty ||
+                        callData.from ||
+                        callData.callerNumber ||
+                        callData.caller;
+    const calledPhone = callData.address ||
+                        callData.calledParty ||
+                        callData.to ||
+                        callData.calledNumber ||
+                        callData.called;
+
+    log.info({
+      callerPhone,
+      calledPhone,
+      source: 'telstra'
+    }, 'Telstra webhook');
+
+    if (!callerPhone) {
+      return res.status(400).json({ error: 'Caller number required' });
+    }
+
+    // Check for missed call indicators
+    const eventType = req.body.eventType || req.body.event;
+    const isMissed = eventType === 'Missed' ||
+                     eventType === 'CallMissed' ||
+                     eventType === 'missed' ||
+                     callData.disposition === 'missed' ||
+                     callData.result === 'missed' ||
+                     callData.status === 'missed';
+
+    if (isMissed) {
+      const settings = await findUserByPhone(calledPhone);
+
+      if (!settings) {
+        return res.json({ status: 'ok', action: 'no_user_found' });
+      }
+
+      const result = await processMissedCall(
+        settings.user_id,
+        vonage.normalizePhoneNumber(callerPhone),
+        settings,
+        callData.callId || callData.id
+      );
+
+      return res.json({ status: 'ok', ...result });
+    }
+
+    return res.json({ status: 'ok', action: 'event_ignored' });
+  } catch (error) {
+    log.error({ error: error.message }, 'Telstra webhook error');
+    captureException(error, { context: 'pbx_telstra_webhook' });
+    return res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+/**
+ * Optus Business Systems (Loop, Business Voice)
+ * POST /api/pbx/missed-call/optus
+ */
+router.post('/missed-call/optus', webhookIPLimiter, async (req, res) => {
+  try {
+    const callData = req.body.call || req.body;
+    const callerPhone = callData.remoteParty?.address ||
+                        callData.callingParty ||
+                        callData.from ||
+                        callData.callerNumber ||
+                        callData.caller;
+    const calledPhone = callData.address ||
+                        callData.calledParty ||
+                        callData.to ||
+                        callData.calledNumber ||
+                        callData.called;
+
+    log.info({
+      callerPhone,
+      calledPhone,
+      source: 'optus'
+    }, 'Optus webhook');
+
+    if (!callerPhone) {
+      return res.status(400).json({ error: 'Caller number required' });
+    }
+
+    const eventType = req.body.eventType || req.body.event;
+    const isMissed = eventType === 'Missed' ||
+                     eventType === 'CallMissed' ||
+                     eventType === 'missed' ||
+                     callData.disposition === 'missed' ||
+                     callData.result === 'missed' ||
+                     callData.status === 'missed';
+
+    if (isMissed) {
+      const settings = await findUserByPhone(calledPhone);
+
+      if (!settings) {
+        return res.json({ status: 'ok', action: 'no_user_found' });
+      }
+
+      const result = await processMissedCall(
+        settings.user_id,
+        vonage.normalizePhoneNumber(callerPhone),
+        settings,
+        callData.callId || callData.id
+      );
+
+      return res.json({ status: 'ok', ...result });
+    }
+
+    return res.json({ status: 'ok', action: 'event_ignored' });
+  } catch (error) {
+    log.error({ error: error.message }, 'Optus webhook error');
+    captureException(error, { context: 'pbx_optus_webhook' });
+    return res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+/**
  * Test missed call endpoint (requires auth)
  * POST /api/pbx/test-missed-call
  */
@@ -629,13 +1072,34 @@ router.post('/test-missed-call', authenticate, async (req, res) => {
 });
 
 /**
- * Health check
+ * Health check and supported systems list
  */
 router.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     service: 'pbx-webhooks',
-    supportedSystems: ['generic', '3cx', 'ringcentral', 'vonage', 'freepbx', '8x8', 'zoom']
+    supportedSystems: {
+      tier1_cloud: ['ringcentral', '8x8', 'nextiva', 'dialpad', 'zoom', 'vonage', 'goto', 'webex'],
+      tier2_au_telcos: ['telstra', 'optus', 'broadsoft'],
+      tier3_onprem: ['3cx', 'freepbx'],
+      generic: ['generic']
+    },
+    endpoints: {
+      generic: '/api/pbx/missed-call',
+      ringcentral: '/api/pbx/missed-call/ringcentral',
+      '8x8': '/api/pbx/missed-call/8x8',
+      nextiva: '/api/pbx/missed-call/nextiva',
+      dialpad: '/api/pbx/missed-call/dialpad',
+      zoom: '/api/pbx/missed-call/zoom',
+      vonage: '/api/pbx/missed-call/vonage',
+      goto: '/api/pbx/missed-call/goto',
+      webex: '/api/pbx/missed-call/webex',
+      telstra: '/api/pbx/missed-call/telstra',
+      optus: '/api/pbx/missed-call/optus',
+      broadsoft: '/api/pbx/missed-call/broadsoft',
+      '3cx': '/api/pbx/missed-call/3cx',
+      freepbx: '/api/pbx/missed-call/freepbx'
+    }
   });
 });
 
