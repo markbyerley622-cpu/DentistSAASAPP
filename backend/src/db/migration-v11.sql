@@ -1,61 +1,11 @@
 -- Migration v11: Performance indexes, delivery tracking, and idempotency
--- Run this migration to optimize queries and add message tracking
+-- Run this in Supabase SQL Editor or your database client
 
 -- ================================================
--- PERFORMANCE INDEXES
+-- STEP 1: ADD NEW COLUMNS FIRST
 -- ================================================
 
--- Conversations: Fast lookup by user and phone
-CREATE INDEX IF NOT EXISTS idx_conversations_user_phone
-ON conversations(user_id, caller_phone);
-
--- Conversations: Fast lookup for active conversations
-CREATE INDEX IF NOT EXISTS idx_conversations_status_active
-ON conversations(status)
-WHERE status NOT IN ('completed', 'appointment_booked');
-
--- Appointments: Fast lookup by date and user (for slot availability)
-CREATE INDEX IF NOT EXISTS idx_appointments_user_date
-ON appointments(user_id, appointment_date, appointment_time);
-
--- Appointments: Fast lookup for upcoming appointments
-CREATE INDEX IF NOT EXISTS idx_appointments_upcoming
-ON appointments(user_id, appointment_date)
-WHERE status NOT IN ('cancelled', 'no_show');
-
--- Messages: Fast lookup by conversation (for state retrieval)
-CREATE INDEX IF NOT EXISTS idx_messages_conversation_created
-ON messages(conversation_id, created_at DESC);
-
--- Messages: Fast lookup by external ID (for idempotency and delivery tracking)
-CREATE INDEX IF NOT EXISTS idx_messages_external_id
-ON messages(external_message_id)
-WHERE external_message_id IS NOT NULL;
-
--- Leads: Fast lookup by conversation
-CREATE INDEX IF NOT EXISTS idx_leads_conversation
-ON leads(conversation_id)
-WHERE conversation_id IS NOT NULL;
-
--- Leads: Fast lookup for stale leads (auto-flag job)
-CREATE INDEX IF NOT EXISTS idx_leads_status_created
-ON leads(status, created_at)
-WHERE status = 'new';
-
--- Calls: Fast lookup for stale calls (auto-flag job)
-CREATE INDEX IF NOT EXISTS idx_calls_followup_created
-ON calls(followup_status, created_at)
-WHERE followup_status IN ('pending', 'in_progress');
-
--- Calls: Fast lookup by user and recent
-CREATE INDEX IF NOT EXISTS idx_calls_user_created
-ON calls(user_id, created_at DESC);
-
--- ================================================
--- DELIVERY TRACKING COLUMNS
--- ================================================
-
--- Add external message ID for idempotency (if not exists)
+-- Add external message ID for idempotency
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -110,11 +60,7 @@ BEGIN
   END IF;
 END $$;
 
--- ================================================
--- CONVERSATION STATE IMPROVEMENTS
--- ================================================
-
--- Add dedicated state column to conversations (better than parsing messages)
+-- Add state_data to conversations
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -125,7 +71,7 @@ BEGIN
   END IF;
 END $$;
 
--- Add last activity timestamp
+-- Add last_activity_at to conversations
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -136,11 +82,7 @@ BEGIN
   END IF;
 END $$;
 
--- ================================================
--- COOLDOWN TRACKING
--- ================================================
-
--- Add last SMS sent timestamp to conversations
+-- Add last_sms_at to conversations for cooldown tracking
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -152,10 +94,59 @@ BEGIN
 END $$;
 
 -- ================================================
--- UNIQUE CONSTRAINT FOR IDEMPOTENCY
+-- STEP 2: CREATE INDEXES (after columns exist)
 -- ================================================
 
--- Add unique constraint on external_message_id (allows null, enforces uniqueness on non-null)
+-- Conversations: Fast lookup by user and phone
+CREATE INDEX IF NOT EXISTS idx_conversations_user_phone
+ON conversations(user_id, caller_phone);
+
+-- Conversations: Fast lookup for active conversations
+CREATE INDEX IF NOT EXISTS idx_conversations_status_active
+ON conversations(status)
+WHERE status NOT IN ('completed', 'appointment_booked');
+
+-- Appointments: Fast lookup by date and user (for slot availability)
+CREATE INDEX IF NOT EXISTS idx_appointments_user_date
+ON appointments(user_id, appointment_date, appointment_time);
+
+-- Appointments: Fast lookup for upcoming appointments
+CREATE INDEX IF NOT EXISTS idx_appointments_upcoming
+ON appointments(user_id, appointment_date)
+WHERE status NOT IN ('cancelled', 'no_show');
+
+-- Messages: Fast lookup by conversation (for state retrieval)
+CREATE INDEX IF NOT EXISTS idx_messages_conversation_created
+ON messages(conversation_id, created_at DESC);
+
+-- Messages: Fast lookup by external ID (for idempotency and delivery tracking)
+CREATE INDEX IF NOT EXISTS idx_messages_external_id
+ON messages(external_message_id)
+WHERE external_message_id IS NOT NULL;
+
+-- Leads: Fast lookup by conversation
+CREATE INDEX IF NOT EXISTS idx_leads_conversation
+ON leads(conversation_id)
+WHERE conversation_id IS NOT NULL;
+
+-- Leads: Fast lookup for stale leads (auto-flag job)
+CREATE INDEX IF NOT EXISTS idx_leads_status_created
+ON leads(status, created_at)
+WHERE status = 'new';
+
+-- Calls: Fast lookup for stale calls (auto-flag job)
+CREATE INDEX IF NOT EXISTS idx_calls_followup_created
+ON calls(followup_status, created_at)
+WHERE followup_status IN ('pending', 'in_progress');
+
+-- Calls: Fast lookup by user and recent
+CREATE INDEX IF NOT EXISTS idx_calls_user_created
+ON calls(user_id, created_at DESC);
+
+-- ================================================
+-- STEP 3: ADD UNIQUE CONSTRAINT FOR IDEMPOTENCY
+-- ================================================
+
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -172,7 +163,7 @@ EXCEPTION
 END $$;
 
 -- ================================================
--- COMMENTS
+-- STEP 4: ADD COLUMN COMMENTS
 -- ================================================
 
 COMMENT ON COLUMN messages.external_message_id IS 'External provider message ID for idempotency and tracking';
@@ -183,7 +174,7 @@ COMMENT ON COLUMN conversations.last_activity_at IS 'Last activity timestamp for
 COMMENT ON COLUMN conversations.last_sms_at IS 'Last SMS sent timestamp for cooldown';
 
 -- ================================================
--- UPDATE EXISTING DATA
+-- STEP 5: UPDATE EXISTING DATA
 -- ================================================
 
 -- Set provider for existing messages based on twilio_sid
