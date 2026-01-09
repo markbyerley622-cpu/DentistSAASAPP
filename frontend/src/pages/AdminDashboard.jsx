@@ -40,9 +40,9 @@ function ClientCard({ client }) {
         <div>
           <h4 className="font-medium text-dark-100">{client.practiceName}</h4>
           <p className="text-xs text-dark-500">{client.email}</p>
-          {client.twilioPhone && (
+          {client.smsNumber && (
             <p className="text-xs text-accent-400 mt-1">
-              {client.twilioPhone}
+              {client.smsNumber}
             </p>
           )}
         </div>

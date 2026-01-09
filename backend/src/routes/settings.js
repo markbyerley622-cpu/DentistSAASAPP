@@ -2,7 +2,7 @@ const express = require('express');
 const { query } = require('../db/config');
 const { authenticate } = require('../middleware/auth');
 const { validate, schemas } = require('../middleware/validate');
-const cellcast = require('../services/cellcast');
+const vonage = require('../services/vonage');
 
 const router = express.Router();
 
@@ -177,7 +177,7 @@ router.put('/ai-greeting', async (req, res) => {
   }
 });
 
-// POST /api/settings/sms/test - Test CellCast SMS configuration
+// POST /api/settings/sms/test - Test Vonage SMS configuration
 router.post('/sms/test', async (req, res) => {
   try {
     const userId = req.user.id;
@@ -187,9 +187,9 @@ router.post('/sms/test', async (req, res) => {
       return res.status(400).json({ error: { message: 'Test phone number is required' } });
     }
 
-    // Check if CellCast API key is configured in environment
-    if (!process.env.CELLCAST_API_KEY) {
-      return res.status(400).json({ error: { message: 'CellCast API key not configured' } });
+    // Check if Vonage credentials are configured in environment
+    if (!process.env.VONAGE_API_KEY || !process.env.VONAGE_API_SECRET) {
+      return res.status(400).json({ error: { message: 'Vonage credentials not configured' } });
     }
 
     // Get settings for user's SMS reply number
@@ -198,11 +198,12 @@ router.post('/sms/test', async (req, res) => {
       [userId]
     );
 
-    const fromNumber = settingsResult.rows[0]?.sms_reply_number || process.env.CELLCAST_PHONE_NUMBER;
+    const fromNumber = settingsResult.rows[0]?.sms_reply_number || process.env.VONAGE_FROM_NUMBER;
 
-    // Send test SMS using env API key
-    const result = await cellcast.sendSMS(
-      process.env.CELLCAST_API_KEY,
+    // Send test SMS using Vonage
+    const result = await vonage.sendSMS(
+      process.env.VONAGE_API_KEY,
+      process.env.VONAGE_API_SECRET,
       testPhone,
       'This is a test message from SmileDesk. Your SMS configuration is working!',
       fromNumber

@@ -78,7 +78,7 @@ router.get('/clients', async (req, res) => {
         u.phone,
         u.timezone,
         u.created_at,
-        s.twilio_phone,
+        s.sms_reply_number,
         s.forwarding_phone,
         (SELECT COUNT(*) FROM calls c WHERE c.user_id = u.id) as total_calls,
         (SELECT COUNT(*) FROM calls c WHERE c.user_id = u.id AND c.is_missed = true) as missed_calls,
@@ -102,7 +102,7 @@ router.get('/clients', async (req, res) => {
         practiceName: client.practice_name,
         phone: client.phone,
         timezone: client.timezone,
-        twilioPhone: client.twilio_phone,
+        smsNumber: client.sms_reply_number,
         forwardingPhone: client.forwarding_phone,
         createdAt: client.created_at,
         stats: {
@@ -293,11 +293,11 @@ router.get('/client/:id', async (req, res) => {
         u.phone,
         u.timezone,
         u.created_at,
-        s.twilio_account_sid,
-        s.twilio_phone,
+        s.sms_reply_number,
         s.forwarding_phone,
         s.business_hours,
-        s.ai_greeting
+        s.ai_greeting,
+        s.booking_mode
        FROM users u
        LEFT JOIN settings s ON s.user_id = u.id
        WHERE u.id = $1 AND u.is_admin = false`,
@@ -331,11 +331,12 @@ router.get('/client/:id', async (req, res) => {
         timezone: client.timezone,
         createdAt: client.created_at,
         settings: {
-          twilioConfigured: !!client.twilio_account_sid,
-          twilioPhone: client.twilio_phone,
+          smsConfigured: !!client.sms_reply_number,
+          smsNumber: client.sms_reply_number,
           forwardingPhone: client.forwarding_phone,
           businessHours: client.business_hours,
-          aiGreeting: client.ai_greeting
+          aiGreeting: client.ai_greeting,
+          bookingMode: client.booking_mode
         },
         recentActivity: {
           callsLast30Days: parseInt(callsResult.rows[0].count),

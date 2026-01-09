@@ -53,7 +53,7 @@ app.use('/api/conversations', conversationsRoutes);
 app.use('/api/appointments', appointmentsRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/pbx', pbxRoutes);     // PBX missed call webhooks
-app.use('/api/sms', smsRoutes);     // CellCast SMS webhooks
+app.use('/api/sms', smsRoutes);     // Vonage SMS webhooks (instant two-way)
 
 // Error handling middleware
 app.use((err, req, res, next) => {
