@@ -269,7 +269,7 @@ export default function MissedCalls() {
                   <th className="text-left py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider hidden sm:table-cell">
                     Type
                   </th>
-                  <th className="text-left py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider hidden md:table-cell">
+                  <th className="text-left py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider">
                     AI Status
                   </th>
                   <th className="text-right py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider">
@@ -303,7 +303,7 @@ export default function MissedCalls() {
                     <td className="py-3 px-4 hidden sm:table-cell">
                       <CallTypeBadge callbackType={call.callbackType} aiStatus={call.aiStatus} />
                     </td>
-                    <td className="py-3 px-4 hidden md:table-cell">
+                    <td className="py-3 px-4">
                       <AIStatusBadge aiStatus={call.aiStatus} />
                     </td>
                     <td className="py-3 px-4 text-right">
