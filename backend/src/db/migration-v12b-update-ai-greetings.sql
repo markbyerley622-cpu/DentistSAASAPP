@@ -8,13 +8,11 @@
 
 -- Update all settings with the new SMS message
 -- Uses practice_name from users table for personalization
-UPDATE settings s
-SET ai_greeting = 'Hi! This is ' || COALESCE(u.practice_name, 'our practice') || '. We missed your call.
-
-Reply 1 for appointment request or 2 for other enquiry. We''ll call you back shortly.',
+UPDATE settings
+SET ai_greeting = CONCAT('Hi! This is ', COALESCE(u.practice_name, 'our practice'), '. We missed your call. Reply 1 for appointment request or 2 for other enquiry. We''ll call you back shortly.'),
     updated_at = NOW()
 FROM users u
-WHERE s.user_id = u.id;
+WHERE settings.user_id = u.id;
 
 -- ================================================
 -- VERIFICATION
