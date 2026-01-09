@@ -13,7 +13,8 @@ import {
   Sparkles,
   PartyPopper,
   Sun,
-  Moon
+  Moon,
+  Check
 } from 'lucide-react'
 
 // Beautiful status badges with clear meaning
@@ -57,7 +58,7 @@ function CallStatus({ call }) {
         </div>
         <div>
           <p className="text-sm font-semibold text-warning-400">Waiting</p>
-          <p className="text-xs text-warning-400/60">SMS sent</p>
+          <p className="text-xs text-warning-400/60">Follow-up sent</p>
         </div>
       </div>
     )
@@ -86,32 +87,60 @@ function CallStatus({ call }) {
       </div>
       <div>
         <p className="text-sm font-semibold text-dark-300">Sending</p>
-        <p className="text-xs text-dark-500">SMS going out now</p>
+        <p className="text-xs text-dark-500">SMS follow-up sending</p>
       </div>
     </div>
   )
 }
 
-// Beautiful call button
-function ActionButton({ call }) {
+// Beautiful call button with Mark as Done
+function ActionButton({ call, onMarkDone, isMarking }) {
   if (call.appointmentBooked || call.followupStatus === 'completed') {
     return null
   }
 
   if (call.followupStatus === 'no_response') {
     return (
-      <a
-        href={`tel:${call.callerPhone}`}
-        onClick={(e) => e.stopPropagation()}
-        className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-danger-500 to-danger-600 hover:from-danger-600 hover:to-danger-700 text-white font-semibold text-sm shadow-lg shadow-danger-500/25 hover:shadow-danger-500/40 transition-all hover:scale-105"
-      >
-        <Phone className="w-4 h-4" />
-        Call Now
-      </a>
+      <div className="flex items-center gap-2">
+        <button
+          onClick={(e) => {
+            e.stopPropagation()
+            onMarkDone(call.id)
+          }}
+          disabled={isMarking}
+          className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-dark-700 hover:bg-dark-600 text-dark-300 hover:text-success-400 text-sm transition-all"
+          title="Mark as done"
+        >
+          <Check className="w-4 h-4" />
+          <span className="hidden sm:inline">Done</span>
+        </button>
+        <a
+          href={`tel:${call.callerPhone}`}
+          onClick={(e) => e.stopPropagation()}
+          className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-danger-500 to-danger-600 hover:from-danger-600 hover:to-danger-700 text-white font-semibold text-sm shadow-lg shadow-danger-500/25 hover:shadow-danger-500/40 transition-all hover:scale-105"
+        >
+          <Phone className="w-4 h-4" />
+          Call Now
+        </a>
+      </div>
     )
   }
 
-  return null
+  // For waiting status, also show mark as done
+  return (
+    <button
+      onClick={(e) => {
+        e.stopPropagation()
+        onMarkDone(call.id)
+      }}
+      disabled={isMarking}
+      className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-dark-700 hover:bg-dark-600 text-dark-300 hover:text-success-400 text-sm transition-all"
+      title="Mark as done (called them manually)"
+    >
+      <Check className="w-4 h-4" />
+      <span className="hidden sm:inline">Mark Done</span>
+    </button>
+  )
 }
 
 // Detail modal - clean and focused
@@ -205,7 +234,7 @@ function CallDetailModal({ call, onClose }) {
 }
 
 // Call card component
-function CallCard({ call, onClick, formatTime }) {
+function CallCard({ call, onClick, formatTime, onMarkDone, isMarking }) {
   return (
     <div
       onClick={() => onClick(call)}
@@ -237,7 +266,7 @@ function CallCard({ call, onClick, formatTime }) {
           <div className="hidden sm:block">
             <CallStatus call={call} />
           </div>
-          <ActionButton call={call} />
+          <ActionButton call={call} onMarkDone={onMarkDone} isMarking={isMarking} />
         </div>
       </div>
 
@@ -245,7 +274,7 @@ function CallCard({ call, onClick, formatTime }) {
       <div className="sm:hidden mt-4 pt-4 border-t border-dark-700/30">
         <div className="flex items-center justify-between">
           <CallStatus call={call} />
-          <ActionButton call={call} />
+          <ActionButton call={call} onMarkDone={onMarkDone} isMarking={isMarking} />
         </div>
       </div>
     </div>
@@ -258,6 +287,7 @@ export default function MissedCalls() {
   const [pagination, setPagination] = useState({ page: 1, totalPages: 1, total: 0 })
   const [search, setSearch] = useState('')
   const [selectedCall, setSelectedCall] = useState(null)
+  const [markingId, setMarkingId] = useState(null)
 
   const fetchCalls = async () => {
     setLoading(true)
@@ -275,6 +305,21 @@ export default function MissedCalls() {
       console.error('Failed to fetch calls:', error)
     } finally {
       setLoading(false)
+    }
+  }
+
+  // Mark a call as done - sets followup_status to 'completed'
+  // This removes it from Missed Calls but keeps it in Follow-Ups
+  const handleMarkDone = async (callId) => {
+    setMarkingId(callId)
+    try {
+      await callsAPI.update(callId, { followupStatus: 'completed' })
+      // Remove from local state immediately for snappy UX
+      setCalls(prev => prev.filter(c => c.id !== callId))
+    } catch (error) {
+      console.error('Failed to mark call as done:', error)
+    } finally {
+      setMarkingId(null)
     }
   }
 
@@ -412,6 +457,8 @@ export default function MissedCalls() {
                     call={call}
                     onClick={setSelectedCall}
                     formatTime={formatTime}
+                    onMarkDone={handleMarkDone}
+                    isMarking={markingId === call.id}
                   />
                 ))}
               </div>
@@ -445,6 +492,8 @@ export default function MissedCalls() {
                     call={call}
                     onClick={setSelectedCall}
                     formatTime={formatTime}
+                    onMarkDone={handleMarkDone}
+                    isMarking={markingId === call.id}
                   />
                 ))}
               </div>

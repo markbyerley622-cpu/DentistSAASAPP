@@ -186,16 +186,17 @@ router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user.id;
-    const { callerName, callReason, status, notes } = req.body;
+    const { callerName, callReason, status, notes, followupStatus } = req.body;
 
     const result = await query(
       `UPDATE calls
        SET caller_name = COALESCE($1, caller_name),
            call_reason = COALESCE($2, call_reason),
-           status = COALESCE($3, status)
-       WHERE id = $4 AND user_id = $5
+           status = COALESCE($3, status),
+           followup_status = COALESCE($4, followup_status)
+       WHERE id = $5 AND user_id = $6
        RETURNING *`,
-      [callerName, callReason, status, id, userId]
+      [callerName, callReason, status, followupStatus, id, userId]
     );
 
     if (result.rows.length === 0) {

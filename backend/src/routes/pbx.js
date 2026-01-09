@@ -2,7 +2,7 @@
  * PBX Webhook Handler
  *
  * Receives missed call notifications from various VoIP/PBX systems and triggers
- * SMS follow-up via ClickSend. The dentist's PBX handles calls and voicemails -
+ * SMS follow-up via Vonage. The dentist's PBX handles calls and voicemails -
  * this system only sends SMS when a caller doesn't leave a voicemail.
  *
  * Supported PBX Systems:
@@ -27,7 +27,7 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const { query } = require('../db/config');
-const clicksend = require('../services/clicksend');
+const vonage = require('../services/vonage');
 
 const router = express.Router();
 
@@ -67,27 +67,27 @@ async function canSendSMS(userId, callerPhone) {
 async function sendMissedCallSMS(settings, callerPhone, callId = null) {
   const practiceName = settings.practice_name || 'our practice';
 
-  // Get ClickSend credentials
-  const username = process.env.CLICKSEND_USERNAME;
-  const apiKey = process.env.CLICKSEND_API_KEY;
+  // Get Vonage credentials
+  const apiKey = process.env.VONAGE_API_KEY;
+  const apiSecret = process.env.VONAGE_API_SECRET;
 
-  if (!username || !apiKey) {
-    console.error('ClickSend credentials not configured for user:', settings.user_id);
+  if (!apiKey || !apiSecret) {
+    console.error('Vonage credentials not configured for user:', settings.user_id);
     return { success: false, error: 'SMS not configured' };
   }
 
-  // Get the reply number (ClickSend dedicated number)
-  const fromNumber = settings.sms_reply_number || process.env.CLICKSEND_PHONE_NUMBER;
+  // Get the reply number (Vonage dedicated number)
+  const fromNumber = settings.sms_reply_number || process.env.VONAGE_FROM_NUMBER;
 
   // Get follow-up message
   const followUpMessage = settings.ai_greeting ||
     `Hi! This is ${practiceName}. We missed your call and want to make sure we help you. Reply 1 for us to call you back, or Reply 2 to schedule an appointment. Thanks!`;
 
   try {
-    const result = await clicksend.sendSMS(username, apiKey, callerPhone, followUpMessage, fromNumber);
+    const result = await vonage.sendSMS(apiKey, apiSecret, callerPhone, followUpMessage, fromNumber);
 
     if (result.success) {
-      console.log(`SMS follow-up sent to ${callerPhone} via ClickSend`);
+      console.log(`SMS follow-up sent to ${callerPhone} via Vonage`);
 
       // Create conversation record
       const conversationResult = await query(
@@ -124,7 +124,7 @@ async function sendMissedCallSMS(settings, callerPhone, callId = null) {
 
       return { success: true, conversationId };
     } else {
-      console.error('Failed to send SMS via ClickSend:', result.error);
+      console.error('Failed to send SMS via Vonage:', result.error);
       return { success: false, error: result.error };
     }
   } catch (error) {
@@ -138,7 +138,7 @@ async function sendMissedCallSMS(settings, callerPhone, callId = null) {
  * The PBX forwards calls to our "virtual" number, which we track
  */
 async function findUserByForwardingPhone(forwardingPhone) {
-  const normalized = clicksend.normalizePhoneNumber(forwardingPhone);
+  const normalized = vonage.normalizePhoneNumber(forwardingPhone);
 
   const result = await query(
     `SELECT s.*, u.id as user_id, u.practice_name, u.phone as user_phone
@@ -155,7 +155,7 @@ async function findUserByForwardingPhone(forwardingPhone) {
  * Find user by their business phone number
  */
 async function findUserByBusinessPhone(businessPhone) {
-  const normalized = clicksend.normalizePhoneNumber(businessPhone);
+  const normalized = vonage.normalizePhoneNumber(businessPhone);
 
   const result = await query(
     `SELECT s.*, u.id as user_id, u.practice_name, u.phone as user_phone
@@ -260,14 +260,14 @@ router.post('/missed-call', async (req, res) => {
       await query(
         `INSERT INTO calls (user_id, caller_phone, status, is_missed, followup_status)
          VALUES ($1, $2, 'no-answer', true, 'completed')`,
-        [settings.user_id, clicksend.normalizePhoneNumber(callerNum)]
+        [settings.user_id, vonage.normalizePhoneNumber(callerNum)]
       );
 
       return res.json({ status: 'ok', action: 'voicemail_left', sms_sent: false });
     }
 
     // No voicemail - check cooldown and send SMS
-    const normalizedCaller = clicksend.normalizePhoneNumber(callerNum);
+    const normalizedCaller = vonage.normalizePhoneNumber(callerNum);
 
     if (!(await canSendSMS(settings.user_id, normalizedCaller))) {
       console.log(`SMS cooldown active for ${callerNum}`);
@@ -353,13 +353,13 @@ router.post('/missed-call/3cx', async (req, res) => {
       await query(
         `INSERT INTO calls (user_id, caller_phone, status, is_missed, followup_status)
          VALUES ($1, $2, 'no-answer', true, 'completed')`,
-        [settings.user_id, clicksend.normalizePhoneNumber(callerPhone)]
+        [settings.user_id, vonage.normalizePhoneNumber(callerPhone)]
       );
       return res.json({ status: 'ok', action: 'voicemail_left', sms_sent: false });
     }
 
     // Send SMS
-    const normalizedCaller = clicksend.normalizePhoneNumber(callerPhone);
+    const normalizedCaller = vonage.normalizePhoneNumber(callerPhone);
 
     if (!(await canSendSMS(settings.user_id, normalizedCaller))) {
       return res.json({ status: 'ok', action: 'cooldown_active', sms_sent: false });
@@ -434,7 +434,7 @@ router.post('/missed-call/ringcentral', async (req, res) => {
     }
 
     // RingCentral handles voicemail separately - if webhook fires, assume no voicemail
-    const normalizedCaller = clicksend.normalizePhoneNumber(callerPhone);
+    const normalizedCaller = vonage.normalizePhoneNumber(callerPhone);
 
     if (!(await canSendSMS(settings.user_id, normalizedCaller))) {
       return res.json({ status: 'ok', action: 'cooldown_active', sms_sent: false });
@@ -501,7 +501,7 @@ router.post('/missed-call/vonage', async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    const normalizedCaller = clicksend.normalizePhoneNumber(callerPhone);
+    const normalizedCaller = vonage.normalizePhoneNumber(callerPhone);
 
     if (!(await canSendSMS(settings.user_id, normalizedCaller))) {
       return res.json({ status: 'ok', action: 'cooldown_active', sms_sent: false });
@@ -562,7 +562,7 @@ router.post('/missed-call/freepbx', async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    const normalizedCaller = clicksend.normalizePhoneNumber(callerPhone);
+    const normalizedCaller = vonage.normalizePhoneNumber(callerPhone);
 
     if (!(await canSendSMS(settings.user_id, normalizedCaller))) {
       return res.json({ status: 'ok', action: 'cooldown_active', sms_sent: false });
@@ -628,7 +628,7 @@ router.post('/missed-call/8x8', async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    const normalizedCaller = clicksend.normalizePhoneNumber(callerPhone);
+    const normalizedCaller = vonage.normalizePhoneNumber(callerPhone);
 
     if (!(await canSendSMS(settings.user_id, normalizedCaller))) {
       return res.json({ status: 'ok', action: 'cooldown_active', sms_sent: false });
@@ -696,7 +696,7 @@ router.post('/missed-call/zoom', async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    const normalizedCaller = clicksend.normalizePhoneNumber(callerPhone);
+    const normalizedCaller = vonage.normalizePhoneNumber(callerPhone);
 
     if (!(await canSendSMS(settings.user_id, normalizedCaller))) {
       return res.json({ status: 'ok', action: 'cooldown_active', sms_sent: false });
@@ -775,16 +775,16 @@ router.post('/test-missed-call', authenticate, async (req, res) => {
     const settings = settingsResult.rows[0];
     settings.user_id = userId;
 
-    // Check if ClickSend is configured
-    if (!process.env.CLICKSEND_USERNAME || !process.env.CLICKSEND_API_KEY) {
-      return res.status(400).json({ error: 'ClickSend credentials not configured' });
+    // Check if Vonage is configured
+    if (!process.env.VONAGE_API_KEY || !process.env.VONAGE_API_SECRET) {
+      return res.status(400).json({ error: 'Vonage credentials not configured' });
     }
 
-    if (!settings.sms_reply_number && !process.env.CLICKSEND_PHONE_NUMBER) {
+    if (!settings.sms_reply_number && !process.env.VONAGE_FROM_NUMBER) {
       return res.status(400).json({ error: 'SMS reply number not configured' });
     }
 
-    const normalizedCaller = clicksend.normalizePhoneNumber(testPhone);
+    const normalizedCaller = vonage.normalizePhoneNumber(testPhone);
 
     // Create a test call record
     const callResult = await query(
