@@ -14,21 +14,67 @@ import {
   PartyPopper,
   Sun,
   Moon,
-  Check
+  Check,
+  CalendarCheck,
+  PhoneCall
 } from 'lucide-react'
+
+// Format appointment time nicely
+function formatAppointmentTime(dateString) {
+  if (!dateString) return null
+  const date = new Date(dateString)
+  return date.toLocaleDateString('en-AU', {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true
+  })
+}
 
 // Beautiful status badges with clear meaning
 function CallStatus({ call }) {
   // BOOKED = They're coming in!
+  if (call.appointmentBooked && call.appointmentTime) {
+    return (
+      <div className="flex items-center gap-3">
+        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-success-500/20 to-success-600/20 flex items-center justify-center ring-1 ring-success-500/30">
+          <CalendarCheck className="w-5 h-5 text-success-400" />
+        </div>
+        <div>
+          <p className="text-sm font-semibold text-success-400">Booked</p>
+          <p className="text-xs text-success-400/80">{formatAppointmentTime(call.appointmentTime)}</p>
+        </div>
+      </div>
+    )
+  }
+
+  // BOOKED but no time (fallback)
   if (call.appointmentBooked) {
     return (
       <div className="flex items-center gap-3">
         <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-success-500/20 to-success-600/20 flex items-center justify-center ring-1 ring-success-500/30">
-          <CheckCircle2 className="w-5 h-5 text-success-400" />
+          <CalendarCheck className="w-5 h-5 text-success-400" />
         </div>
         <div>
           <p className="text-sm font-semibold text-success-400">Booked</p>
           <p className="text-xs text-success-400/60">Appointment made</p>
+        </div>
+      </div>
+    )
+  }
+
+  // WANTS CALLBACK - check preferredTime contains "callback"
+  if (call.preferredTime?.toLowerCase().includes('callback') || call.leadStatus === 'qualified') {
+    return (
+      <div className="flex items-center gap-3">
+        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-500/20 to-purple-600/20 flex items-center justify-center ring-1 ring-purple-500/30">
+          <PhoneCall className="w-5 h-5 text-purple-400" />
+        </div>
+        <div>
+          <p className="text-sm font-semibold text-purple-400">Wants Callback</p>
+          <p className="text-xs text-purple-400/60">Call them back</p>
         </div>
       </div>
     )
@@ -233,32 +279,73 @@ function CallDetailModal({ call, onClose }) {
   )
 }
 
-// Call card component
+// Call card component - shows WHO / WHAT / WHEN / WHY / STATUS
 function CallCard({ call, onClick, formatTime, onMarkDone, isMarking }) {
+  // Determine what they want
+  const wantsCallback = call.preferredTime?.toLowerCase().includes('callback') || call.leadStatus === 'qualified'
+  const hasAppointment = call.appointmentBooked && call.appointmentTime
+
+  // Get the border color based on priority
+  const getBorderColor = () => {
+    if (call.followupStatus === 'no_response') return 'border-danger-500/30 hover:border-danger-500/50'
+    if (wantsCallback) return 'border-purple-500/30 hover:border-purple-500/50'
+    if (call.appointmentBooked) return 'border-success-500/30 hover:border-success-500/50'
+    return 'border-dark-700/50 hover:border-dark-600'
+  }
+
+  const getBackgroundColor = () => {
+    if (call.followupStatus === 'no_response') return 'bg-gradient-to-r from-danger-500/10 to-danger-500/5'
+    if (wantsCallback) return 'bg-gradient-to-r from-purple-500/10 to-purple-500/5'
+    if (call.appointmentBooked) return 'bg-gradient-to-r from-success-500/10 to-success-500/5'
+    return 'bg-dark-800/30 hover:bg-dark-800/50'
+  }
+
   return (
     <div
       onClick={() => onClick(call)}
-      className={`group p-5 rounded-2xl border cursor-pointer transition-all duration-200 hover:shadow-xl ${
-        call.followupStatus === 'no_response'
-          ? 'bg-gradient-to-r from-danger-500/10 to-danger-500/5 border-danger-500/30 hover:border-danger-500/50 hover:shadow-danger-500/10'
-          : call.appointmentBooked
-          ? 'bg-gradient-to-r from-success-500/10 to-success-500/5 border-success-500/30 hover:border-success-500/50 hover:shadow-success-500/10'
-          : 'bg-dark-800/30 border-dark-700/50 hover:border-dark-600 hover:bg-dark-800/50'
-      }`}
+      className={`group p-5 rounded-2xl border cursor-pointer transition-all duration-200 hover:shadow-xl ${getBackgroundColor()} ${getBorderColor()}`}
     >
       <div className="flex items-center justify-between gap-4">
-        {/* Left: Who + When */}
+        {/* Left: Who + What + When */}
         <div className="flex-1 min-w-0">
+          {/* WHO */}
           <p className="font-bold text-dark-100 text-lg truncate group-hover:text-white transition-colors">
             {call.callerName || call.callerPhone}
           </p>
           {call.callerName && (
             <p className="text-dark-400 text-sm font-mono mt-0.5">{call.callerPhone}</p>
           )}
-          <p className="text-dark-500 text-sm mt-2 flex items-center gap-1.5">
-            <Clock className="w-3.5 h-3.5" />
-            {formatTime(call.createdAt)}
-          </p>
+
+          {/* WHAT - Reason / Request */}
+          {call.callReason && (
+            <p className="text-dark-300 text-sm mt-2 truncate">
+              "{call.callReason}"
+            </p>
+          )}
+
+          {/* WHEN - Call time + Appointment time if booked */}
+          <div className="flex flex-wrap items-center gap-3 mt-2 text-sm">
+            <span className="text-dark-500 flex items-center gap-1.5">
+              <Clock className="w-3.5 h-3.5" />
+              {formatTime(call.createdAt)}
+            </span>
+
+            {/* Show appointment time prominently if booked */}
+            {hasAppointment && (
+              <span className="text-success-400 flex items-center gap-1.5 font-medium">
+                <CalendarCheck className="w-3.5 h-3.5" />
+                {formatAppointmentTime(call.appointmentTime)}
+              </span>
+            )}
+
+            {/* Show callback request */}
+            {wantsCallback && !hasAppointment && (
+              <span className="text-purple-400 flex items-center gap-1.5 font-medium">
+                <PhoneCall className="w-3.5 h-3.5" />
+                Wants callback
+              </span>
+            )}
+          </div>
         </div>
 
         {/* Right: Status + Action */}

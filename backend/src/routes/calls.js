@@ -91,12 +91,15 @@ router.get('/', async (req, res) => {
     );
     const total = parseInt(countResult.rows[0].count);
 
-    // Get calls
+    // Get calls with lead data (appointment info)
     const result = await query(
       `SELECT c.id, c.twilio_call_sid, c.caller_phone, c.caller_name, c.call_reason, c.duration,
               c.recording_url, c.transcription, c.status, c.sentiment, c.ai_summary, c.created_at,
-              c.followup_status, c.is_missed
+              c.followup_status, c.is_missed,
+              l.appointment_booked, l.appointment_time, l.preferred_time, l.reason as lead_reason,
+              l.status as lead_status
        FROM calls c
+       LEFT JOIN leads l ON l.call_id = c.id
        ${whereClause}
        ORDER BY c.created_at DESC
        LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}`,
@@ -109,7 +112,7 @@ router.get('/', async (req, res) => {
         twilioCallSid: call.twilio_call_sid,
         callerPhone: call.caller_phone,
         callerName: call.caller_name,
-        callReason: call.call_reason,
+        callReason: call.call_reason || call.lead_reason,
         duration: call.duration,
         recordingUrl: call.recording_url,
         transcription: call.transcription,
@@ -119,7 +122,12 @@ router.get('/', async (req, res) => {
         createdAt: call.created_at,
         followupStatus: call.followup_status,
         isMissed: call.is_missed,
-        isDuringBusinessHours: isDuringBusinessHours(call.created_at, businessHours)
+        isDuringBusinessHours: isDuringBusinessHours(call.created_at, businessHours),
+        // Lead/appointment data
+        appointmentBooked: call.appointment_booked || false,
+        appointmentTime: call.appointment_time,
+        preferredTime: call.preferred_time,
+        leadStatus: call.lead_status
       })),
       pagination: {
         page: parseInt(page),
