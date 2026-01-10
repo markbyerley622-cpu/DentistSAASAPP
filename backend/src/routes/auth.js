@@ -1,11 +1,11 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
-const twilio = require('twilio');
 const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
 const { query } = require('../db/config');
 const { generateToken, generateRefreshToken, validateRefreshToken, revokeRefreshToken, authenticate } = require('../middleware/auth');
 const { validate, schemas } = require('../middleware/validate');
+const notifyre = require('../services/notifyre');
 
 const router = express.Router();
 
@@ -27,46 +27,9 @@ const otpLimiter = rateLimit({
   legacyHeaders: false
 });
 
-// Initialize Twilio client for OTP (uses platform credentials from env)
-const getTwilioClient = () => {
-  const accountSid = process.env.TWILIO_ACCOUNT_SID;
-  const authToken = process.env.TWILIO_AUTH_TOKEN;
-  if (!accountSid || !authToken) {
-    return null;
-  }
-  return twilio(accountSid, authToken);
-};
-
 // Generate 6-digit OTP
 const generateOTP = () => {
   return crypto.randomInt(100000, 999999).toString();
-};
-
-/**
- * Format phone number to E.164 format for Twilio
- * Handles Australian numbers: +614xxxxxxxx or 04xxxxxxxx
- */
-const formatPhoneForTwilio = (phone) => {
-  // Remove all non-digit characters except leading +
-  let cleaned = phone.replace(/[^\d+]/g, '');
-
-  // If already has +61, return as-is
-  if (cleaned.startsWith('+61')) {
-    return cleaned;
-  }
-
-  // If starts with +, assume valid international format
-  if (cleaned.startsWith('+')) {
-    return cleaned;
-  }
-
-  // Remove leading zero (04xx -> 4xx)
-  if (cleaned.startsWith('0')) {
-    cleaned = cleaned.substring(1);
-  }
-
-  // Add Australian country code
-  return `+61${cleaned}`;
 };
 
 // POST /api/auth/register
@@ -299,26 +262,32 @@ router.post('/forgot-password', otpLimiter, validate(schemas.forgotPassword), as
       [cleanPhone, otp, expiresAt]
     );
 
-    // Send OTP via Twilio
-    const twilioClient = getTwilioClient();
-    const twilioPhone = process.env.TWILIO_PHONE_NUMBER;
+    // Send OTP via Notifyre
+    const notifyreAccountId = process.env.NOTIFYRE_ACCOUNT_ID;
+    const notifyreApiToken = process.env.NOTIFYRE_API_TOKEN;
+    const notifyreFromNumber = process.env.NOTIFYRE_FROM_NUMBER;
 
-    if (twilioClient && twilioPhone) {
+    if (notifyreAccountId && notifyreApiToken && notifyreFromNumber) {
       try {
-        const formattedPhone = formatPhoneForTwilio(cleanPhone);
-        await twilioClient.messages.create({
-          body: `Your SmileDesk verification code is: ${otp}. This code expires in 10 minutes.`,
-          from: twilioPhone,
-          to: formattedPhone
-        });
-        console.log(`OTP sent to ${formattedPhone}`);
-      } catch (twilioError) {
-        console.error('Twilio SMS error:', twilioError);
+        const formattedPhone = notifyre.normalizePhoneNumber(cleanPhone);
+        const result = await notifyre.sendSMS(
+          notifyreAccountId,
+          notifyreApiToken,
+          formattedPhone,
+          `Your SmileDesk verification code is: ${otp}. This code expires in 10 minutes.`,
+          notifyreFromNumber
+        );
+        if (result.success) {
+          console.log(`OTP sent to ${formattedPhone}`);
+        } else {
+          console.error('Notifyre SMS error:', result.error);
+        }
+      } catch (notifyreError) {
+        console.error('Notifyre SMS error:', notifyreError);
         // Don't fail the request, just log the error
-        // In production, you might want to handle this differently
       }
     } else {
-      // Log OTP in development when Twilio isn't configured
+      // Log OTP in development when Notifyre isn't configured
       console.log(`[DEV] OTP for ${cleanPhone}: ${otp}`);
     }
 
