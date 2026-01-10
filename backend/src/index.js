@@ -7,7 +7,7 @@ const helmet = require('helmet');
 const { logger } = require('./utils/logger');
 const { initSentry, requestHandler, tracingHandler, errorHandler, flush } = require('./utils/sentry');
 const { startScheduler, stopScheduler, getSchedulerStatus } = require('./jobs/scheduler');
-const { captureRawBody } = require('./middleware/vonageWebhook');
+const { captureRawBody } = require('./middleware/notifyreWebhook');
 
 // Import routes
 const authRoutes = require('./routes/auth');

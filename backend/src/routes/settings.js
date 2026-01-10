@@ -2,7 +2,7 @@ const express = require('express');
 const { query } = require('../db/config');
 const { authenticate } = require('../middleware/auth');
 const { validate, schemas } = require('../middleware/validate');
-const vonage = require('../services/vonage');
+const notifyre = require('../services/notifyre');
 
 const router = express.Router();
 
@@ -177,7 +177,7 @@ router.put('/ai-greeting', async (req, res) => {
   }
 });
 
-// POST /api/settings/sms/test - Test Vonage SMS configuration
+// POST /api/settings/sms/test - Test Notifyre SMS configuration
 router.post('/sms/test', async (req, res) => {
   try {
     const userId = req.user.id;
@@ -187,9 +187,9 @@ router.post('/sms/test', async (req, res) => {
       return res.status(400).json({ error: { message: 'Test phone number is required' } });
     }
 
-    // Check if Vonage credentials are configured in environment
-    if (!process.env.VONAGE_API_KEY || !process.env.VONAGE_API_SECRET) {
-      return res.status(400).json({ error: { message: 'Vonage credentials not configured' } });
+    // Check if Notifyre credentials are configured in environment
+    if (!process.env.NOTIFYRE_ACCOUNT_ID || !process.env.NOTIFYRE_API_TOKEN) {
+      return res.status(400).json({ error: { message: 'Notifyre credentials not configured' } });
     }
 
     // Get settings for user's SMS reply number
@@ -198,12 +198,16 @@ router.post('/sms/test', async (req, res) => {
       [userId]
     );
 
-    const fromNumber = settingsResult.rows[0]?.sms_reply_number || process.env.VONAGE_FROM_NUMBER;
+    const fromNumber = settingsResult.rows[0]?.sms_reply_number || process.env.NOTIFYRE_FROM_NUMBER;
 
-    // Send test SMS using Vonage
-    const result = await vonage.sendSMS(
-      process.env.VONAGE_API_KEY,
-      process.env.VONAGE_API_SECRET,
+    if (!fromNumber) {
+      return res.status(400).json({ error: { message: 'No SMS reply number configured' } });
+    }
+
+    // Send test SMS using Notifyre
+    const result = await notifyre.sendSMS(
+      process.env.NOTIFYRE_ACCOUNT_ID,
+      process.env.NOTIFYRE_API_TOKEN,
       testPhone,
       'This is a test message from SmileDesk. Your SMS configuration is working!',
       fromNumber

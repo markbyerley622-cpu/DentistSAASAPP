@@ -1,5 +1,5 @@
 /**
- * SMS Routes - Vonage Two-Way SMS Integration
+ * SMS Routes - Notifyre Two-Way SMS Integration
  * Handles inbound SMS webhooks and callback classification flow
  *
  * SIMPLIFIED FLOW (V2):
@@ -16,17 +16,17 @@
 
 const express = require('express');
 const { query, getClient } = require('../db/config');
-const vonage = require('../services/vonage');
+const notifyre = require('../services/notifyre');
 const { sms: log } = require('../utils/logger');
 const { withSMSRetry } = require('../utils/retry');
 const { captureException } = require('../utils/sentry');
 const {
-  validateVonageSignature,
+  validateNotifyreSignature,
   webhookPhoneLimiter,
   webhookIPLimiter,
   idempotencyCheck,
   rollbackIdempotency
-} = require('../middleware/vonageWebhook');
+} = require('../middleware/notifyreWebhook');
 
 const router = express.Router();
 
@@ -42,17 +42,17 @@ async function handleInboundSMS(req, res) {
   const startTime = Date.now();
 
   try {
-    // Parse webhook data (Vonage sends different formats)
+    // Parse webhook data (Notifyre sends POST with JSON body)
     const webhookData = req.method === 'GET' ? req.query : req.body;
 
-    // Parse using Vonage service
-    const parsed = vonage.parseInboundWebhook(webhookData);
+    // Parse using Notifyre service
+    const parsed = notifyre.parseInboundWebhook(webhookData);
 
-    const { from: callerPhone, to: vonageNumber, message: messageBody, messageId } = parsed;
+    const { from: callerPhone, to: notifyreNumber, message: messageBody, messageId } = parsed;
 
     log.info({
       from: callerPhone,
-      to: vonageNumber,
+      to: notifyreNumber,
       messageId,
       bodyLength: messageBody?.length
     }, 'Inbound SMS received');
@@ -63,25 +63,25 @@ async function handleInboundSMS(req, res) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    // Find user by their Vonage number (sms_reply_number in settings)
+    // Find user by their Notifyre number (sms_reply_number in settings)
     const userResult = await query(
       `SELECT s.*, u.id as user_id, u.practice_name
        FROM settings s
        JOIN users u ON s.user_id = u.id
        WHERE s.sms_reply_number = $1`,
-      [vonageNumber]
+      [notifyreNumber]
     );
 
     // Fallback: try to find by the normalized phone number
     let settings = userResult.rows[0];
     if (!settings) {
-      const normalizedVonage = vonage.normalizePhoneNumber(vonageNumber);
+      const normalizedNotifyre = notifyre.normalizePhoneNumber(notifyreNumber);
       const fallbackResult = await query(
         `SELECT s.*, u.id as user_id, u.practice_name
          FROM settings s
          JOIN users u ON s.user_id = u.id
          WHERE s.sms_reply_number = $1`,
-        [normalizedVonage]
+        [normalizedNotifyre]
       );
       settings = fallbackResult.rows[0];
     }
@@ -94,13 +94,13 @@ async function handleInboundSMS(req, res) {
          JOIN users u ON s.user_id = u.id
          WHERE s.forwarding_phone = $1
          LIMIT 1`,
-        [vonage.normalizePhoneNumber(callerPhone)]
+        [notifyre.normalizePhoneNumber(callerPhone)]
       );
       settings = forwardingResult.rows[0];
     }
 
     if (!settings) {
-      log.warn({ vonageNumber, callerPhone }, 'No user found for Vonage number');
+      log.warn({ notifyreNumber, callerPhone }, 'No user found for Notifyre number');
       return res.json({ status: 'ok', action: 'no_user_found' });
     }
 
@@ -156,7 +156,7 @@ async function handleInboundSMS(req, res) {
 
     await query(
       `INSERT INTO messages (conversation_id, sender, content, message_type, external_message_id, delivery_status, provider)
-       VALUES ($1, 'patient', $2, 'text', $3, 'delivered', 'vonage')`,
+       VALUES ($1, 'patient', $2, 'text', $3, 'delivered', 'notifyre')`,
       [conversationId, messageBody, messageId]
     );
 
@@ -176,14 +176,14 @@ async function handleInboundSMS(req, res) {
     // Process conversation and generate response
     const aiResponse = await handleConversation(conversationId, messageBody, settings, conversation);
 
-    // Send response with retry
+    // Send response with retry using Notifyre
     const sendResult = await withSMSRetry(
-      () => vonage.sendSMS(
-        process.env.VONAGE_API_KEY,
-        process.env.VONAGE_API_SECRET,
+      () => notifyre.sendSMS(
+        process.env.NOTIFYRE_ACCOUNT_ID,
+        process.env.NOTIFYRE_API_TOKEN,
         callerPhone,
         aiResponse,
-        settings.sms_reply_number || process.env.VONAGE_FROM_NUMBER
+        settings.sms_reply_number || process.env.NOTIFYRE_FROM_NUMBER
       ),
       { context: `sms-reply-${conversationId}` }
     );
@@ -191,7 +191,7 @@ async function handleInboundSMS(req, res) {
     // Store outbound message
     await query(
       `INSERT INTO messages (conversation_id, sender, content, message_type, external_message_id, delivery_status, provider)
-       VALUES ($1, 'ai', $2, 'text', $3, $4, 'vonage')`,
+       VALUES ($1, 'ai', $2, 'text', $3, $4, 'notifyre')`,
       [conversationId, aiResponse, sendResult.messageId || null, sendResult.success ? 'sent' : 'failed']
     );
 
@@ -228,12 +228,12 @@ async function handleInboundSMS(req, res) {
 router.post('/incoming',
   webhookIPLimiter,
   webhookPhoneLimiter,
-  validateVonageSignature,
+  validateNotifyreSignature,
   idempotencyCheck,
   handleInboundSMS
 );
 
-// GET support for initial Vonage webhook verification (not recommended for production)
+// GET support for initial webhook verification (not recommended for production)
 router.get('/incoming', handleInboundSMS);
 
 /**
@@ -288,8 +288,8 @@ router.post('/status', webhookIPLimiter, async (req, res) => {
 router.get('/health', (req, res) => {
   res.json({
     status: 'ok',
-    provider: 'vonage',
-    configured: !!(process.env.VONAGE_API_KEY && process.env.VONAGE_API_SECRET)
+    provider: 'notifyre',
+    configured: !!(process.env.NOTIFYRE_ACCOUNT_ID && process.env.NOTIFYRE_API_TOKEN)
   });
 });
 

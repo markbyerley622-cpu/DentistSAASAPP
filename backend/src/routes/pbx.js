@@ -38,11 +38,11 @@
 
 const express = require('express');
 const { query } = require('../db/config');
-const vonage = require('../services/vonage');
+const notifyre = require('../services/notifyre');
 const { pbx: log } = require('../utils/logger');
 const { withSMSRetry } = require('../utils/retry');
 const { captureException } = require('../utils/sentry');
-const { webhookIPLimiter } = require('../middleware/vonageWebhook');
+const { webhookIPLimiter } = require('../middleware/notifyreWebhook');
 
 const router = express.Router();
 
@@ -70,7 +70,7 @@ async function canSendSMS(userId, callerPhone) {
  * Find user by their phone number (forwarding_phone or sms_reply_number)
  */
 async function findUserByPhone(phone) {
-  const normalized = vonage.normalizePhoneNumber(phone);
+  const normalized = notifyre.normalizePhoneNumber(phone);
 
   // Try forwarding_phone first (most common)
   let result = await query(
@@ -175,8 +175,8 @@ async function processMissedCall(userId, callerPhone, settings, callSid = null, 
   const followUpMessage = settings.ai_greeting ||
     `Hi! This is ${practiceName}. We missed your call.\n\nReply 1 for appointment or 2 for other. We'll call you back shortly.`;
 
-  // Send SMS with retry
-  const fromNumber = settings.sms_reply_number || process.env.VONAGE_FROM_NUMBER;
+  // Send SMS with retry using Notifyre
+  const fromNumber = settings.sms_reply_number || process.env.NOTIFYRE_FROM_NUMBER;
 
   if (!fromNumber) {
     log.error({ userId }, 'No SMS reply number configured');
@@ -189,9 +189,9 @@ async function processMissedCall(userId, callerPhone, settings, callSid = null, 
 
   try {
     const sendResult = await withSMSRetry(
-      () => vonage.sendSMS(
-        process.env.VONAGE_API_KEY,
-        process.env.VONAGE_API_SECRET,
+      () => notifyre.sendSMS(
+        process.env.NOTIFYRE_ACCOUNT_ID,
+        process.env.NOTIFYRE_API_TOKEN,
         callerPhone,
         followUpMessage,
         fromNumber
@@ -203,7 +203,7 @@ async function processMissedCall(userId, callerPhone, settings, callSid = null, 
       // Store outbound message
       await query(
         `INSERT INTO messages (conversation_id, sender, content, message_type, external_message_id, delivery_status, provider)
-         VALUES ($1, 'ai', $2, 'text', $3, 'sent', 'vonage')`,
+         VALUES ($1, 'ai', $2, 'text', $3, 'sent', 'notifyre')`,
         [conversationId, followUpMessage, sendResult.messageId]
       );
 
@@ -266,7 +266,7 @@ router.post('/missed-call', webhookIPLimiter, async (req, res) => {
 
     const result = await processMissedCall(
       settings.user_id,
-      vonage.normalizePhoneNumber(callerPhone),
+      notifyre.normalizePhoneNumber(callerPhone),
       settings,
       callSid,
       hasVoicemail === true || hasVoicemail === 'true'
@@ -322,7 +322,7 @@ router.post('/missed-call/3cx', webhookIPLimiter, async (req, res) => {
 
       const result = await processMissedCall(
         settings.user_id,
-        vonage.normalizePhoneNumber(callerPhone),
+        notifyre.normalizePhoneNumber(callerPhone),
         settings,
         callid
       );
@@ -373,7 +373,7 @@ router.post('/missed-call/ringcentral', webhookIPLimiter, async (req, res) => {
 
       const processResult = await processMissedCall(
         settings.user_id,
-        vonage.normalizePhoneNumber(callerPhone),
+        notifyre.normalizePhoneNumber(callerPhone),
         settings,
         data.id || data.sessionId,
         result === 'Voicemail'
@@ -427,7 +427,7 @@ router.post('/missed-call/vonage', webhookIPLimiter, async (req, res) => {
 
       const result = await processMissedCall(
         settings.user_id,
-        vonage.normalizePhoneNumber(from),
+        notifyre.normalizePhoneNumber(from),
         settings,
         uuid
       );
@@ -483,7 +483,7 @@ router.post('/missed-call/freepbx', webhookIPLimiter, async (req, res) => {
 
       const result = await processMissedCall(
         settings.user_id,
-        vonage.normalizePhoneNumber(callerPhone),
+        notifyre.normalizePhoneNumber(callerPhone),
         settings,
         uniqueid
       );
@@ -533,7 +533,7 @@ router.post('/missed-call/8x8', webhookIPLimiter, async (req, res) => {
 
       const result = await processMissedCall(
         settings.user_id,
-        vonage.normalizePhoneNumber(caller_id),
+        notifyre.normalizePhoneNumber(caller_id),
         settings,
         call_id
       );
@@ -582,7 +582,7 @@ router.post('/missed-call/zoom', webhookIPLimiter, async (req, res) => {
 
       const result = await processMissedCall(
         settings.user_id,
-        vonage.normalizePhoneNumber(callerPhone),
+        notifyre.normalizePhoneNumber(callerPhone),
         settings,
         data.call_id
       );
@@ -636,7 +636,7 @@ router.post('/missed-call/nextiva', webhookIPLimiter, async (req, res) => {
 
       const result = await processMissedCall(
         settings.user_id,
-        vonage.normalizePhoneNumber(callerPhone),
+        notifyre.normalizePhoneNumber(callerPhone),
         settings,
         callId,
         callResult?.toLowerCase() === 'voicemail'
@@ -693,7 +693,7 @@ router.post('/missed-call/dialpad', webhookIPLimiter, async (req, res) => {
 
       const result = await processMissedCall(
         settings.user_id,
-        vonage.normalizePhoneNumber(callerPhone),
+        notifyre.normalizePhoneNumber(callerPhone),
         settings,
         data.call_id || data.id
       );
@@ -752,7 +752,7 @@ router.post('/missed-call/goto', webhookIPLimiter, async (req, res) => {
 
       const result = await processMissedCall(
         settings.user_id,
-        vonage.normalizePhoneNumber(callerPhone),
+        notifyre.normalizePhoneNumber(callerPhone),
         settings,
         callUuid
       );
@@ -809,7 +809,7 @@ router.post('/missed-call/webex', webhookIPLimiter, async (req, res) => {
 
       const result = await processMissedCall(
         settings.user_id,
-        vonage.normalizePhoneNumber(callerPhone),
+        notifyre.normalizePhoneNumber(callerPhone),
         settings,
         callData.callId || callData.id
       );
@@ -876,7 +876,7 @@ router.post('/missed-call/broadsoft', webhookIPLimiter, async (req, res) => {
 
       const result = await processMissedCall(
         settings.user_id,
-        vonage.normalizePhoneNumber(callerPhone),
+        notifyre.normalizePhoneNumber(callerPhone),
         settings,
         callId || externalTrackingId
       );
@@ -945,7 +945,7 @@ router.post('/missed-call/telstra', webhookIPLimiter, async (req, res) => {
 
       const result = await processMissedCall(
         settings.user_id,
-        vonage.normalizePhoneNumber(callerPhone),
+        notifyre.normalizePhoneNumber(callerPhone),
         settings,
         callData.callId || callData.id
       );
@@ -1006,7 +1006,7 @@ router.post('/missed-call/optus', webhookIPLimiter, async (req, res) => {
 
       const result = await processMissedCall(
         settings.user_id,
-        vonage.normalizePhoneNumber(callerPhone),
+        notifyre.normalizePhoneNumber(callerPhone),
         settings,
         callData.callId || callData.id
       );
@@ -1056,7 +1056,7 @@ router.post('/test-missed-call', authenticate, async (req, res) => {
     // Process as missed call (skip voicemail)
     const result = await processMissedCall(
       userId,
-      vonage.normalizePhoneNumber(testPhone),
+      notifyre.normalizePhoneNumber(testPhone),
       settings,
       `test-${Date.now()}`,
       false
