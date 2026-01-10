@@ -265,7 +265,13 @@ router.post('/forgot-password', otpLimiter, validate(schemas.forgotPassword), as
     // Send OTP via Notifyre
     const notifyreAccountId = process.env.NOTIFYRE_ACCOUNT_ID;
     const notifyreApiToken = process.env.NOTIFYRE_API_TOKEN;
-    const notifyreFromNumber = process.env.NOTIFYRE_FROM_NUMBER;
+
+    // Get user's SMS reply number from settings
+    const settingsResult = await query(
+      'SELECT sms_reply_number FROM settings WHERE user_id = $1',
+      [user.id]
+    );
+    const notifyreFromNumber = settingsResult.rows[0]?.sms_reply_number;
 
     if (notifyreAccountId && notifyreApiToken && notifyreFromNumber) {
       try {
@@ -287,8 +293,8 @@ router.post('/forgot-password', otpLimiter, validate(schemas.forgotPassword), as
         // Don't fail the request, just log the error
       }
     } else {
-      // Log OTP in development when Notifyre isn't configured
-      console.log(`[DEV] OTP for ${cleanPhone}: ${otp}`);
+      // Log OTP in development or when SMS not configured for this user
+      console.log(`[DEV/NO-SMS] OTP for ${cleanPhone}: ${otp}`);
     }
 
     res.json({
