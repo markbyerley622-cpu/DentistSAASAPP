@@ -13,13 +13,13 @@
 
 const https = require('https');
 
-// Notifyre Twexit API (Twilio-compatible endpoint)
-const TWEXIT_API_HOST = 'twilio.api.notifyre.com';
+// Notifyre Native API endpoint
+const NOTIFYRE_API_HOST = 'api.notifyre.com';
 
 /**
- * Send SMS via Notifyre Twexit API (Twilio-compatible)
+ * Send SMS via Notifyre Native API
  *
- * @param {string} accountId - Notifyre Account ID
+ * @param {string} accountId - Notifyre Account ID (unused, kept for compatibility)
  * @param {string} apiToken - Notifyre API Token
  * @param {string} to - Recipient phone number (E.164 format)
  * @param {string} message - SMS message content
@@ -27,7 +27,7 @@ const TWEXIT_API_HOST = 'twilio.api.notifyre.com';
  * @returns {Promise<{success: boolean, messageId?: string, error?: string}>}
  */
 async function sendSMS(accountId, apiToken, to, message, from) {
-  if (!accountId || !apiToken) {
+  if (!apiToken) {
     return { success: false, error: 'Notifyre credentials not configured' };
   }
 
@@ -46,31 +46,31 @@ async function sendSMS(accountId, apiToken, to, message, from) {
   try {
     console.log('Notifyre: Sending SMS to', normalizedTo, 'from', normalizedFrom);
 
-    const response = await makeTwexitRequest(accountId, apiToken, {
-      To: normalizedTo,
-      From: normalizedFrom,
-      Body: message
+    const response = await makeNotifyreRequest(apiToken, {
+      recipients: [normalizedTo],
+      from: normalizedFrom,
+      body: message
     });
 
     console.log('Notifyre: Response', JSON.stringify(response));
 
-    // Twexit API returns Twilio-compatible response
-    if (response.sid) {
+    // Native API response
+    if (response.success || response.id || response.messageId) {
       return {
         success: true,
-        messageId: response.sid,
+        messageId: response.id || response.messageId || response.message_id || null,
         response: response
       };
-    } else if (response.error_code || response.error_message) {
+    } else if (response.error || response.message) {
       console.error('Notifyre: API returned error', response);
       return {
         success: false,
-        error: response.error_message || `Error code: ${response.error_code}`
+        error: response.error || response.message || 'Unknown error'
       };
     } else {
       return {
         success: true,
-        messageId: response.message_id || response.id || null,
+        messageId: null,
         response: response
       };
     }
@@ -84,40 +84,31 @@ async function sendSMS(accountId, apiToken, to, message, from) {
 }
 
 /**
- * Make HTTP request to Notifyre Twexit API
+ * Make HTTP request to Notifyre Native API
  *
- * @param {string} accountId - Notifyre Account ID
  * @param {string} apiToken - Notifyre API Token
- * @param {object} body - Request body (To, From, Body)
+ * @param {object} body - Request body (recipients, from, body)
  * @returns {Promise<object>}
  */
-function makeTwexitRequest(accountId, apiToken, body) {
+function makeNotifyreRequest(apiToken, body) {
   return new Promise((resolve, reject) => {
-    // URL-encode the body for form submission
-    const formData = new URLSearchParams();
-    for (const [key, value] of Object.entries(body)) {
-      formData.append(key, value);
-    }
-    const postData = formData.toString();
-
-    // Basic auth: accountId:apiToken
-    const auth = Buffer.from(`${accountId}:${apiToken}`).toString('base64');
+    const postData = JSON.stringify(body);
 
     const options = {
-      hostname: TWEXIT_API_HOST,
+      hostname: NOTIFYRE_API_HOST,
       port: 443,
-      path: `/Accounts/${accountId}/Messages.json`,
+      path: '/v2/sms/send',
       method: 'POST',
       headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(postData),
-        'Authorization': `Basic ${auth}`,
+        'Authorization': `Bearer ${apiToken}`,
         'Accept': 'application/json',
         'User-Agent': 'SmileDesk/1.0'
       }
     };
 
-    console.log('Notifyre: Making request to', `https://${TWEXIT_API_HOST}${options.path}`);
+    console.log('Notifyre: Making request to', `https://${NOTIFYRE_API_HOST}${options.path}`);
 
     const req = https.request(options, (res) => {
       let data = '';
@@ -130,7 +121,7 @@ function makeTwexitRequest(accountId, apiToken, body) {
         try {
           const parsed = JSON.parse(data);
           if (res.statusCode >= 400) {
-            reject(new Error(parsed.message || parsed.error_message || `HTTP ${res.statusCode}`));
+            reject(new Error(parsed.message || parsed.error || `HTTP ${res.statusCode}`));
           } else {
             resolve(parsed);
           }
