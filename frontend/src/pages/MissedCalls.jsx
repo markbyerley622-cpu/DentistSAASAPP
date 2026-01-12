@@ -192,15 +192,18 @@ export default function MissedCalls() {
     load()
   }, [fetchActiveCalls])
 
-  // Mark call as done - optimistic update
+  // Mark call as done - optimistic update, move to history
   const handleMarkDone = async (callId) => {
     // Prevent double-clicks
     if (markingIds.has(callId)) return
     setMarkingIds(prev => new Set(prev).add(callId))
 
-    // Optimistic: Remove from active immediately
+    // Optimistic: Move from active to history immediately
     const callToMove = activeCalls.find(c => c.id === callId)
     setActiveCalls(prev => prev.filter(c => c.id !== callId))
+    if (callToMove) {
+      setHistoryCalls(prev => [callToMove, ...prev])
+    }
 
     try {
       await callsAPI.update(callId, {
@@ -209,8 +212,9 @@ export default function MissedCalls() {
       })
     } catch (error) {
       console.error('Failed to mark as done:', error)
-      // Rollback: Add back to active
+      // Rollback: Move back from history to active
       if (callToMove) {
+        setHistoryCalls(prev => prev.filter(c => c.id !== callId))
         setActiveCalls(prev => [callToMove, ...prev])
       }
     } finally {
@@ -222,8 +226,9 @@ export default function MissedCalls() {
     }
   }
 
+  // All active calls need callback (except those still sending initial SMS)
   const needsCallbackCount = activeCalls.filter(
-    c => c.aiStatus === 'no_response' || c.aiStatus === 'replied'
+    c => c.aiStatus !== 'sending'
   ).length
 
   return (
@@ -274,7 +279,7 @@ export default function MissedCalls() {
           </div>
         </div>
       ) : (
-        /* Active Calls Table */
+        /* Active Calls - Cards on mobile, Table on desktop */
         <div className="bg-dark-800/50 rounded-xl border border-dark-700/50 overflow-hidden">
           {activeCalls.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16 px-4">
@@ -283,56 +288,24 @@ export default function MissedCalls() {
               <p className="text-dark-500 text-sm mt-1">No missed calls need your attention.</p>
             </div>
           ) : (
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-dark-700/50">
-                  <th className="text-left py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider">
-                    Phone
-                  </th>
-                  <th className="text-left py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider">
-                    Time
-                  </th>
-                  <th className="text-left py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider hidden sm:table-cell">
-                    Type
-                  </th>
-                  <th className="text-left py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider">
-                    AI Status
-                  </th>
-                  <th className="text-right py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider">
-                    Action
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-dark-700/30">
+            <>
+              {/* Mobile Cards */}
+              <div className="md:hidden divide-y divide-dark-700/30">
                 {activeCalls.map((call) => (
-                  <tr
-                    key={call.id}
-                    className="hover:bg-dark-700/30 transition-colors"
-                  >
-                    <td className="py-3 px-4">
+                  <div key={call.id} className="p-4 space-y-3">
+                    <div className="flex items-start justify-between gap-3">
                       <div>
                         <p className="font-medium text-dark-100">
                           {call.callerName || formatPhone(call.callerPhone)}
                         </p>
-                        {call.callerName && (
-                          <p className="text-xs text-dark-500 font-mono mt-0.5">
-                            {formatPhone(call.callerPhone)}
-                          </p>
-                        )}
+                        <p className="text-xs text-dark-500 mt-0.5">
+                          {formatTime(call.createdAt)}
+                        </p>
                       </div>
-                    </td>
-                    <td className="py-3 px-4">
-                      <span className="text-sm text-dark-300">
-                        {formatTime(call.createdAt)}
-                      </span>
-                    </td>
-                    <td className="py-3 px-4 hidden sm:table-cell">
-                      <CallTypeBadge callbackType={call.callbackType} aiStatus={call.aiStatus} />
-                    </td>
-                    <td className="py-3 px-4">
                       <AIStatusBadge aiStatus={call.aiStatus} />
-                    </td>
-                    <td className="py-3 px-4 text-right">
+                    </div>
+                    <div className="flex items-center justify-between gap-3">
+                      <CallTypeBadge callbackType={call.callbackType} aiStatus={call.aiStatus} />
                       <button
                         onClick={() => handleMarkDone(call.id)}
                         disabled={markingIds.has(call.id)}
@@ -341,11 +314,76 @@ export default function MissedCalls() {
                         <Check className="w-4 h-4" />
                         Mark as done
                       </button>
-                    </td>
-                  </tr>
+                    </div>
+                  </div>
                 ))}
-              </tbody>
-            </table>
+              </div>
+
+              {/* Desktop Table */}
+              <table className="w-full hidden md:table">
+                <thead>
+                  <tr className="border-b border-dark-700/50">
+                    <th className="text-left py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider">
+                      Phone
+                    </th>
+                    <th className="text-left py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider">
+                      Time
+                    </th>
+                    <th className="text-left py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider">
+                      Type
+                    </th>
+                    <th className="text-left py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider">
+                      Status
+                    </th>
+                    <th className="text-right py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider">
+                      Action
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-dark-700/30">
+                  {activeCalls.map((call) => (
+                    <tr
+                      key={call.id}
+                      className="hover:bg-dark-700/30 transition-colors"
+                    >
+                      <td className="py-3 px-4">
+                        <div>
+                          <p className="font-medium text-dark-100">
+                            {call.callerName || formatPhone(call.callerPhone)}
+                          </p>
+                          {call.callerName && (
+                            <p className="text-xs text-dark-500 font-mono mt-0.5">
+                              {formatPhone(call.callerPhone)}
+                            </p>
+                          )}
+                        </div>
+                      </td>
+                      <td className="py-3 px-4">
+                        <span className="text-sm text-dark-300">
+                          {formatTime(call.createdAt)}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4">
+                        <CallTypeBadge callbackType={call.callbackType} aiStatus={call.aiStatus} />
+                      </td>
+                      <td className="py-3 px-4">
+                        <AIStatusBadge aiStatus={call.aiStatus} />
+                      </td>
+                      <td className="py-3 px-4 text-right">
+                        <button
+                          onClick={() => handleMarkDone(call.id)}
+                          disabled={markingIds.has(call.id)}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-dark-700 hover:bg-dark-600 text-dark-300 hover:text-dark-100 text-sm font-medium transition-colors border border-dark-600 disabled:opacity-50"
+                        >
+                          <Check className="w-4 h-4" />
+                          Mark as done
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
           )}
         </div>
       )}
@@ -363,7 +401,31 @@ export default function MissedCalls() {
 
           {showHistory && (
             <div className="bg-dark-800/30 rounded-xl border border-dark-700/30 overflow-hidden">
-              <table className="w-full">
+              {/* Mobile Cards */}
+              <div className="md:hidden divide-y divide-dark-700/20">
+                {historyCalls.map((call) => (
+                  <div key={call.id} className="p-4 space-y-2 opacity-60">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="font-medium text-dark-300">
+                          {call.callerName || formatPhone(call.callerPhone)}
+                        </p>
+                        <p className="text-xs text-dark-500 mt-0.5">
+                          {formatTime(call.createdAt)}
+                        </p>
+                      </div>
+                      <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-dark-700/50 text-dark-400 text-xs font-medium">
+                        <Check className="w-3 h-3 text-success-500" />
+                        Done
+                      </span>
+                    </div>
+                    <CallTypeBadge callbackType={call.callbackType} aiStatus={call.aiStatus} />
+                  </div>
+                ))}
+              </div>
+
+              {/* Desktop Table */}
+              <table className="w-full hidden md:table">
                 <thead>
                   <tr className="border-b border-dark-700/30">
                     <th className="text-left py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider">
@@ -372,7 +434,7 @@ export default function MissedCalls() {
                     <th className="text-left py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider">
                       Time
                     </th>
-                    <th className="text-left py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider hidden sm:table-cell">
+                    <th className="text-left py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider">
                       Type
                     </th>
                     <th className="text-right py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider">
@@ -400,7 +462,7 @@ export default function MissedCalls() {
                           {formatTime(call.createdAt)}
                         </span>
                       </td>
-                      <td className="py-3 px-4 hidden sm:table-cell">
+                      <td className="py-3 px-4">
                         <CallTypeBadge callbackType={call.callbackType} aiStatus={call.aiStatus} />
                       </td>
                       <td className="py-3 px-4 text-right">
