@@ -86,29 +86,44 @@ function CallTypeBadge({ callbackType, aiStatus }) {
   )
 }
 
-// AI status indicator
+// AI status indicator - shows status with callback needed indicator
 function AIStatusBadge({ aiStatus }) {
   switch (aiStatus) {
     case 'replied':
       return (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-success-500/20 text-success-400 text-xs font-medium">
-          <CheckCircle2 className="w-3 h-3" />
-          Replied
-        </span>
+        <div className="flex flex-col gap-1">
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-success-500/20 text-success-400 text-xs font-medium">
+            <CheckCircle2 className="w-3 h-3" />
+            Replied
+          </span>
+          <span className="text-xs font-medium text-danger-400">
+            Needs Callback
+          </span>
+        </div>
       )
     case 'waiting':
       return (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-warning-500/20 text-warning-400 text-xs font-medium">
-          <Clock className="w-3 h-3" />
-          Waiting
-        </span>
+        <div className="flex flex-col gap-1">
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-warning-500/20 text-warning-400 text-xs font-medium">
+            <Clock className="w-3 h-3" />
+            Waiting
+          </span>
+          <span className="text-xs font-medium text-danger-400">
+            Needs Callback
+          </span>
+        </div>
       )
     case 'no_response':
       return (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-danger-500/20 text-danger-400 text-xs font-medium">
-          <AlertCircle className="w-3 h-3" />
-          Needs Reply
-        </span>
+        <div className="flex flex-col gap-1">
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-danger-500/20 text-danger-400 text-xs font-medium">
+            <AlertCircle className="w-3 h-3" />
+            No Response
+          </span>
+          <span className="text-xs font-medium text-danger-400">
+            Needs Callback
+          </span>
+        </div>
       )
     default:
       return (
@@ -122,11 +137,13 @@ function AIStatusBadge({ aiStatus }) {
 
 export default function MissedCalls() {
   const [activeCalls, setActiveCalls] = useState([])
+  const [historyCalls, setHistoryCalls] = useState([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [markingIds, setMarkingIds] = useState(new Set())
+  const [showHistory, setShowHistory] = useState(false)
 
-  // Fetch active calls
+  // Fetch active and history calls
   const fetchActiveCalls = useCallback(async () => {
     try {
       const response = await callsAPI.getAll({
@@ -135,22 +152,31 @@ export default function MissedCalls() {
         ...(search && { search })
       })
 
-      // Filter to only pending calls and compute AI status
-      const pending = response.data.calls
-        .filter(c => c.receptionistStatus !== 'done' && c.followupStatus !== 'completed')
-        .map(call => {
-          let aiStatus = 'sending'
-          if (call.handledByAi && call.callbackType) {
-            aiStatus = 'replied'
-          } else if (call.followupStatus === 'no_response') {
-            aiStatus = 'no_response'
-          } else if (call.followupStatus === 'in_progress') {
-            aiStatus = 'waiting'
-          }
-          return { ...call, aiStatus }
-        })
+      // Separate pending and completed calls
+      const pending = []
+      const completed = []
+
+      response.data.calls.forEach(call => {
+        let aiStatus = 'sending'
+        if (call.handledByAi && call.callbackType) {
+          aiStatus = 'replied'
+        } else if (call.followupStatus === 'no_response') {
+          aiStatus = 'no_response'
+        } else if (call.followupStatus === 'in_progress') {
+          aiStatus = 'waiting'
+        }
+
+        const enrichedCall = { ...call, aiStatus }
+
+        if (call.receptionistStatus === 'done' || call.followupStatus === 'completed') {
+          completed.push(enrichedCall)
+        } else {
+          pending.push(enrichedCall)
+        }
+      })
 
       setActiveCalls(pending)
+      setHistoryCalls(completed)
     } catch (error) {
       console.error('Failed to fetch active calls:', error)
     }
@@ -310,16 +336,84 @@ export default function MissedCalls() {
                       <button
                         onClick={() => handleMarkDone(call.id)}
                         disabled={markingIds.has(call.id)}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-success-500/10 hover:bg-success-500/20 text-success-400 text-sm font-medium transition-colors disabled:opacity-50"
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-dark-700 hover:bg-dark-600 text-dark-300 hover:text-dark-100 text-sm font-medium transition-colors border border-dark-600 disabled:opacity-50"
                       >
                         <Check className="w-4 h-4" />
-                        Done
+                        Mark as done
                       </button>
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+          )}
+        </div>
+      )}
+
+      {/* History Section */}
+      {!loading && historyCalls.length > 0 && (
+        <div className="mt-8">
+          <button
+            onClick={() => setShowHistory(!showHistory)}
+            className="flex items-center gap-2 text-dark-400 hover:text-dark-200 text-sm font-medium transition-colors mb-4"
+          >
+            <span className={`transform transition-transform ${showHistory ? 'rotate-90' : ''}`}>▶</span>
+            History ({historyCalls.length} completed)
+          </button>
+
+          {showHistory && (
+            <div className="bg-dark-800/30 rounded-xl border border-dark-700/30 overflow-hidden">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-dark-700/30">
+                    <th className="text-left py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider">
+                      Phone
+                    </th>
+                    <th className="text-left py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider">
+                      Time
+                    </th>
+                    <th className="text-left py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider hidden sm:table-cell">
+                      Type
+                    </th>
+                    <th className="text-right py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider">
+                      Status
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-dark-700/20">
+                  {historyCalls.map((call) => (
+                    <tr key={call.id} className="opacity-60">
+                      <td className="py-3 px-4">
+                        <div>
+                          <p className="font-medium text-dark-300">
+                            {call.callerName || formatPhone(call.callerPhone)}
+                          </p>
+                          {call.callerName && (
+                            <p className="text-xs text-dark-500 font-mono mt-0.5">
+                              {formatPhone(call.callerPhone)}
+                            </p>
+                          )}
+                        </div>
+                      </td>
+                      <td className="py-3 px-4">
+                        <span className="text-sm text-dark-400">
+                          {formatTime(call.createdAt)}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 hidden sm:table-cell">
+                        <CallTypeBadge callbackType={call.callbackType} aiStatus={call.aiStatus} />
+                      </td>
+                      <td className="py-3 px-4 text-right">
+                        <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-dark-700/50 text-dark-400 text-sm font-medium">
+                          <Check className="w-4 h-4 text-success-500" />
+                          Marked as done
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
       )}
