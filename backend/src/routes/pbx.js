@@ -137,11 +137,14 @@ async function processMissedCall(userId, callerPhone, settings, callSid = null, 
     return { smsSent: false, reason: 'voicemail_left' };
   }
 
-  // Check cooldown
-  const canSend = await canSendSMS(userId, callerPhone);
-  if (!canSend) {
-    log.info({ callerPhone }, 'SMS cooldown active, skipping');
-    return { smsSent: false, reason: 'cooldown' };
+  // Check cooldown (skip for test calls)
+  const isTestCall = callSid && callSid.startsWith('test-');
+  if (!isTestCall) {
+    const canSend = await canSendSMS(userId, callerPhone);
+    if (!canSend) {
+      log.info({ callerPhone }, 'SMS cooldown active, skipping');
+      return { smsSent: false, reason: 'cooldown' };
+    }
   }
 
   // Create call record with new fields
