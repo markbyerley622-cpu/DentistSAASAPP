@@ -6,7 +6,6 @@ import Register from './pages/Register'
 import ForgotPassword from './pages/ForgotPassword'
 import VerifyOTP from './pages/VerifyOTP'
 import ResetPassword from './pages/ResetPassword'
-import Dashboard from './pages/Dashboard'
 import MissedCalls from './pages/MissedCalls'
 import Leads from './pages/Leads'
 import Settings from './pages/Settings'
@@ -134,7 +133,7 @@ function App() {
         <Route path="missed-calls" element={<MissedCalls />} />
         <Route path="missed-patients" element={<Navigate to="/missed-calls" replace />} />
         <Route path="calls" element={<Navigate to="/missed-calls" replace />} />
-        <Route path="dashboard" element={<Dashboard />} />
+        <Route path="dashboard" element={<Navigate to="/missed-calls" replace />} />
         <Route path="leads" element={<Leads />} />
         <Route path="settings" element={<Settings />} />
         <Route path="admin" element={

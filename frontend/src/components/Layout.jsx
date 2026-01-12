@@ -2,7 +2,6 @@ import { useState } from 'react'
 import { Outlet, NavLink, useLocation } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import {
-  LayoutDashboard,
   PhoneMissed,
   History,
   Settings,
@@ -18,7 +17,6 @@ import {
 const navigation = [
   { name: 'Missed Calls', href: '/missed-calls', icon: PhoneMissed },
   { name: 'History', href: '/leads', icon: History },
-  { name: 'Analytics', href: '/dashboard', icon: LayoutDashboard },
   { name: 'Settings', href: '/settings', icon: Settings },
 ]
 

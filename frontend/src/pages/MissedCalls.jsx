@@ -106,7 +106,7 @@ function AIStatusBadge({ aiStatus }) {
         <div className="flex flex-col gap-1">
           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-warning-500/20 text-warning-400 text-xs font-medium">
             <Clock className="w-3 h-3" />
-            Waiting
+            Waiting for response
           </span>
           <span className="text-xs font-medium text-danger-400">
             Needs Callback
