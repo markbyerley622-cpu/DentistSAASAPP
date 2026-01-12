@@ -97,18 +97,19 @@ function makeNotifyreRequest(apiToken, body) {
     const options = {
       hostname: NOTIFYRE_API_HOST,
       port: 443,
-      path: '/v2/sms/send',
+      path: '/sms/send',
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(postData),
-        'Authorization': `Bearer ${apiToken}`,
+        'x-api-token': apiToken,
         'Accept': 'application/json',
         'User-Agent': 'SmileDesk/1.0'
       }
     };
 
     console.log('Notifyre: Making request to', `https://${NOTIFYRE_API_HOST}${options.path}`);
+    console.log('Notifyre: Request body', postData);
 
     const req = https.request(options, (res) => {
       let data = '';
@@ -118,6 +119,8 @@ function makeNotifyreRequest(apiToken, body) {
       });
 
       res.on('end', () => {
+        console.log('Notifyre: HTTP Status', res.statusCode);
+        console.log('Notifyre: Raw response', data);
         try {
           const parsed = JSON.parse(data);
           if (res.statusCode >= 400) {
