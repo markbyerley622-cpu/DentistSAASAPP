@@ -13,6 +13,19 @@ import {
   Users
 } from 'lucide-react'
 
+// Format phone for display
+function formatPhone(phone) {
+  if (!phone) return 'Unknown'
+  const cleaned = phone.replace(/\D/g, '')
+  if (cleaned.length === 10 && cleaned.startsWith('0')) {
+    return `${cleaned.slice(0, 4)} ${cleaned.slice(4, 7)} ${cleaned.slice(7)}`
+  }
+  if (cleaned.length === 11 && cleaned.startsWith('61')) {
+    return `0${cleaned.slice(2, 5)} ${cleaned.slice(5, 8)} ${cleaned.slice(8)}`
+  }
+  return phone
+}
+
 // Format date nicely
 function formatDate(dateString) {
   const date = new Date(dateString)
@@ -141,7 +154,11 @@ export default function Leads() {
         leadsAPI.getAll({ limit: 200 }),
         leadsAPI.getStats()
       ])
-      setLeads(leadsRes.data.leads)
+      // Sort by most recent first
+      const sortedLeads = (leadsRes.data.leads || []).sort(
+        (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
+      )
+      setLeads(sortedLeads)
       setStats(statsRes.data)
     } catch (error) {
       console.error('Failed to fetch leads:', error)
@@ -241,11 +258,17 @@ export default function Leads() {
                 {/* Left: Info */}
                 <div className="flex items-center gap-4">
                   <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-dark-700 to-dark-800 flex items-center justify-center text-lg font-medium text-dark-300 border border-dark-700">
-                    {lead.name?.charAt(0)?.toUpperCase() || '?'}
+                    <Phone className="w-5 h-5" />
                   </div>
                   <div>
-                    <p className="font-semibold text-dark-100">{lead.name || 'Unknown Caller'}</p>
-                    <p className="text-sm text-dark-400 font-mono">{lead.phone}</p>
+                    <p className="font-semibold text-dark-100 font-mono">
+                      {formatPhone(lead.phone)}
+                    </p>
+                    {lead.callbackType && (
+                      <p className="text-sm text-dark-400 mt-0.5">
+                        {lead.callbackType === 'appointment_request' ? 'Appointment Request' : 'General Enquiry'}
+                      </p>
+                    )}
                     {lead.reason && (
                       <p className="text-sm text-dark-500 mt-1">"{lead.reason}"</p>
                     )}

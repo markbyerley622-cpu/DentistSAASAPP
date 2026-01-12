@@ -384,6 +384,14 @@ router.put('/:id', async (req, res) => {
 
     const call = result.rows[0];
 
+    // If marking as done, also update associated lead status to 'handled'
+    if (isDone) {
+      await query(
+        `UPDATE leads SET status = 'handled' WHERE call_id = $1`,
+        [id]
+      );
+    }
+
     res.json({
       call: {
         id: call.id,

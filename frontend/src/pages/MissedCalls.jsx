@@ -137,13 +137,11 @@ function AIStatusBadge({ aiStatus }) {
 
 export default function MissedCalls() {
   const [activeCalls, setActiveCalls] = useState([])
-  const [historyCalls, setHistoryCalls] = useState([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [markingIds, setMarkingIds] = useState(new Set())
-  const [showHistory, setShowHistory] = useState(false)
 
-  // Fetch active and history calls
+  // Fetch active calls only (not done)
   const fetchActiveCalls = useCallback(async () => {
     try {
       const response = await callsAPI.getAll({
@@ -152,31 +150,23 @@ export default function MissedCalls() {
         ...(search && { search })
       })
 
-      // Separate pending and completed calls
-      const pending = []
-      const completed = []
-
-      response.data.calls.forEach(call => {
-        let aiStatus = 'sending'
-        if (call.handledByAi && call.callbackType) {
-          aiStatus = 'replied'
-        } else if (call.followupStatus === 'no_response') {
-          aiStatus = 'no_response'
-        } else if (call.followupStatus === 'in_progress') {
-          aiStatus = 'waiting'
-        }
-
-        const enrichedCall = { ...call, aiStatus }
-
-        if (call.receptionistStatus === 'done' || call.followupStatus === 'completed') {
-          completed.push(enrichedCall)
-        } else {
-          pending.push(enrichedCall)
-        }
-      })
+      // Filter to pending calls, compute AI status, and sort by most recent
+      const pending = response.data.calls
+        .filter(call => call.receptionistStatus !== 'done' && call.followupStatus !== 'completed')
+        .map(call => {
+          let aiStatus = 'sending'
+          if (call.handledByAi && call.callbackType) {
+            aiStatus = 'replied'
+          } else if (call.followupStatus === 'no_response') {
+            aiStatus = 'no_response'
+          } else if (call.followupStatus === 'in_progress') {
+            aiStatus = 'waiting'
+          }
+          return { ...call, aiStatus }
+        })
+        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
 
       setActiveCalls(pending)
-      setHistoryCalls(completed)
     } catch (error) {
       console.error('Failed to fetch active calls:', error)
     }
@@ -192,18 +182,15 @@ export default function MissedCalls() {
     load()
   }, [fetchActiveCalls])
 
-  // Mark call as done - optimistic update, move to history
+  // Mark call as done - just remove from list (goes to History page)
   const handleMarkDone = async (callId) => {
     // Prevent double-clicks
     if (markingIds.has(callId)) return
     setMarkingIds(prev => new Set(prev).add(callId))
 
-    // Optimistic: Move from active to history immediately
-    const callToMove = activeCalls.find(c => c.id === callId)
+    // Optimistic: Remove from active immediately
+    const callToRemove = activeCalls.find(c => c.id === callId)
     setActiveCalls(prev => prev.filter(c => c.id !== callId))
-    if (callToMove) {
-      setHistoryCalls(prev => [callToMove, ...prev])
-    }
 
     try {
       await callsAPI.update(callId, {
@@ -212,10 +199,9 @@ export default function MissedCalls() {
       })
     } catch (error) {
       console.error('Failed to mark as done:', error)
-      // Rollback: Move back from history to active
-      if (callToMove) {
-        setHistoryCalls(prev => prev.filter(c => c.id !== callId))
-        setActiveCalls(prev => [callToMove, ...prev])
+      // Rollback: Add back to active
+      if (callToRemove) {
+        setActiveCalls(prev => [callToRemove, ...prev].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)))
       }
     } finally {
       setMarkingIds(prev => {
@@ -384,98 +370,6 @@ export default function MissedCalls() {
                 </tbody>
               </table>
             </>
-          )}
-        </div>
-      )}
-
-      {/* History Section */}
-      {!loading && historyCalls.length > 0 && (
-        <div className="mt-8">
-          <button
-            onClick={() => setShowHistory(!showHistory)}
-            className="flex items-center gap-2 text-dark-400 hover:text-dark-200 text-sm font-medium transition-colors mb-4"
-          >
-            <span className={`transform transition-transform ${showHistory ? 'rotate-90' : ''}`}>▶</span>
-            History ({historyCalls.length} completed)
-          </button>
-
-          {showHistory && (
-            <div className="bg-dark-800/30 rounded-xl border border-dark-700/30 overflow-hidden">
-              {/* Mobile Cards */}
-              <div className="md:hidden divide-y divide-dark-700/20">
-                {historyCalls.map((call) => (
-                  <div key={call.id} className="p-4 space-y-2 opacity-60">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <p className="font-medium text-dark-300">
-                          {call.callerName || formatPhone(call.callerPhone)}
-                        </p>
-                        <p className="text-xs text-dark-500 mt-0.5">
-                          {formatTime(call.createdAt)}
-                        </p>
-                      </div>
-                      <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-dark-700/50 text-dark-400 text-xs font-medium">
-                        <Check className="w-3 h-3 text-success-500" />
-                        Done
-                      </span>
-                    </div>
-                    <CallTypeBadge callbackType={call.callbackType} aiStatus={call.aiStatus} />
-                  </div>
-                ))}
-              </div>
-
-              {/* Desktop Table */}
-              <table className="w-full hidden md:table">
-                <thead>
-                  <tr className="border-b border-dark-700/30">
-                    <th className="text-left py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider">
-                      Phone
-                    </th>
-                    <th className="text-left py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider">
-                      Time
-                    </th>
-                    <th className="text-left py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider">
-                      Type
-                    </th>
-                    <th className="text-right py-3 px-4 text-xs font-medium text-dark-500 uppercase tracking-wider">
-                      Status
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-dark-700/20">
-                  {historyCalls.map((call) => (
-                    <tr key={call.id} className="opacity-60">
-                      <td className="py-3 px-4">
-                        <div>
-                          <p className="font-medium text-dark-300">
-                            {call.callerName || formatPhone(call.callerPhone)}
-                          </p>
-                          {call.callerName && (
-                            <p className="text-xs text-dark-500 font-mono mt-0.5">
-                              {formatPhone(call.callerPhone)}
-                            </p>
-                          )}
-                        </div>
-                      </td>
-                      <td className="py-3 px-4">
-                        <span className="text-sm text-dark-400">
-                          {formatTime(call.createdAt)}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4">
-                        <CallTypeBadge callbackType={call.callbackType} aiStatus={call.aiStatus} />
-                      </td>
-                      <td className="py-3 px-4 text-right">
-                        <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-dark-700/50 text-dark-400 text-sm font-medium">
-                          <Check className="w-4 h-4 text-success-500" />
-                          Marked as done
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
           )}
         </div>
       )}
