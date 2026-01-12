@@ -13,11 +13,11 @@
 
 const https = require('https');
 
-// Notifyre Native API
-const NOTIFYRE_API_HOST = 'api.notifyre.com';
+// Notifyre Twexit API (Twilio-compatible)
+const NOTIFYRE_API_HOST = 'twilio.api.notifyre.com';
 
 /**
- * Send SMS via Notifyre Native API
+ * Send SMS via Notifyre Twexit API (Twilio-compatible)
  *
  * @param {string} accountId - Notifyre Account ID
  * @param {string} apiToken - Notifyre API Token
@@ -27,7 +27,7 @@ const NOTIFYRE_API_HOST = 'api.notifyre.com';
  * @returns {Promise<{success: boolean, messageId?: string, error?: string}>}
  */
 async function sendSMS(accountId, apiToken, to, message, from) {
-  if (!apiToken) {
+  if (!accountId || !apiToken) {
     return { success: false, error: 'Notifyre credentials not configured' };
   }
 
@@ -46,26 +46,33 @@ async function sendSMS(accountId, apiToken, to, message, from) {
   try {
     console.log('Notifyre: Sending SMS to', normalizedTo, 'from', normalizedFrom);
 
-    const response = await makeNotifyreRequest(apiToken, {
-      recipient: normalizedTo,
+    const response = await makeNotifyreRequest(accountId, apiToken, {
+      body: message,
       from: normalizedFrom,
-      body: message
+      to: normalizedTo
     });
 
     console.log('Notifyre: Response', JSON.stringify(response));
 
-    // Check for success
-    if (response.success !== false && !response.error) {
+    // Twexit API returns sid on success
+    if (response.sid) {
       return {
         success: true,
-        messageId: response.id || response.messageId || null,
+        messageId: response.sid,
         response: response
       };
-    } else {
+    } else if (response.error) {
       console.error('Notifyre: API returned error', response);
       return {
         success: false,
         error: response.error || response.message || 'Unknown error'
+      };
+    } else {
+      // Assume success if no error
+      return {
+        success: true,
+        messageId: response.id || response.messageId || null,
+        response: response
       };
     }
   } catch (error) {
@@ -78,25 +85,35 @@ async function sendSMS(accountId, apiToken, to, message, from) {
 }
 
 /**
- * Make HTTP request to Notifyre Native API
+ * Make HTTP request to Notifyre Twexit API (Twilio-compatible)
+ * Uses Basic auth and form-urlencoded body
  *
+ * @param {string} accountId - Notifyre Account ID
  * @param {string} apiToken - Notifyre API Token
- * @param {object} body - Request body
+ * @param {object} body - Request body (body, from, to)
  * @returns {Promise<object>}
  */
-function makeNotifyreRequest(apiToken, body) {
+function makeNotifyreRequest(accountId, apiToken, body) {
   return new Promise((resolve, reject) => {
-    const postData = JSON.stringify(body);
+    // Form-urlencoded body
+    const formData = new URLSearchParams();
+    formData.append('body', body.body);
+    formData.append('from', body.from);
+    formData.append('to', body.to);
+    const postData = formData.toString();
+
+    // Basic auth: accountId:apiToken base64 encoded
+    const authString = Buffer.from(`${accountId}:${apiToken}`).toString('base64');
 
     const options = {
       hostname: NOTIFYRE_API_HOST,
       port: 443,
-      path: '/sms/send',
+      path: `/Accounts/${accountId}/Messages.json`,
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
+        'Content-Type': 'application/x-www-form-urlencoded',
         'Content-Length': Buffer.byteLength(postData),
-        'Authorization': `Bearer ${apiToken}`,
+        'Authorization': `Basic ${authString}`,
         'Accept': 'application/json'
       }
     };
