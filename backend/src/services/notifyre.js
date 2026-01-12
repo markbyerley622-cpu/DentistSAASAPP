@@ -197,22 +197,18 @@ function normalizePhoneNumber(phone) {
 /**
  * Parse inbound SMS webhook from Notifyre
  *
- * Notifyre webhook format (POST):
+ * Notifyre Native webhook format (POST):
  * {
- *   "id": "abc123",
- *   "from": "+61412345678",       // Sender number
- *   "to": "+61481073412",         // Your Notifyre number
- *   "message": "Hello!",
- *   "receivedDateUtc": "2026-01-10T10:30:00Z",
- *   "type": "sms_received"
- * }
- *
- * May also come in Twilio-compatible format:
- * {
- *   "From": "+61412345678",
- *   "To": "+61481073412",
- *   "Body": "Hello!",
- *   "MessageSid": "abc123"
+ *   "Event": "sms_received",
+ *   "Timestamp": 1768214454,
+ *   "Payload": {
+ *     "RecipientID": "00000000-0000-0000-0000-000000000000",
+ *     "RecipientNumber": "+61430253299",    // Your Notifyre number
+ *     "SenderNumber": "+61414855294",       // Customer's number
+ *     "ReplyID": "c6eefdc4-8ad1-4fea-877e-e18ba2699e4e",
+ *     "Message": "1",
+ *     "ReceivedDateUtc": 1768214449
+ *   }
  * }
  *
  * @param {object} webhookData - Raw webhook payload from Notifyre
@@ -221,11 +217,26 @@ function normalizePhoneNumber(phone) {
 function parseInboundWebhook(webhookData) {
   const data = webhookData;
 
-  // Handle both Notifyre native and Twilio-compatible formats
-  let fromNumber = data.from || data.From || data.msisdn || data.sender;
-  let toNumber = data.to || data.To || data.recipient;
-  let messageBody = data.message || data.Body || data.body || data.text || data.content;
-  let messageId = data.id || data.MessageSid || data.message_id || data.messageId;
+  // Handle Notifyre native format with Payload wrapper
+  const payload = data.Payload || data.payload || data;
+
+  // Extract fields from Notifyre native format
+  let fromNumber = payload.SenderNumber || payload.senderNumber ||
+                   payload.from || payload.From || data.from || data.From ||
+                   payload.msisdn || payload.sender;
+
+  let toNumber = payload.RecipientNumber || payload.recipientNumber ||
+                 payload.to || payload.To || data.to || data.To ||
+                 payload.recipient;
+
+  let messageBody = payload.Message || payload.message ||
+                    payload.Body || payload.body ||
+                    data.message || data.Body || data.body ||
+                    payload.text || payload.content;
+
+  let messageId = payload.ReplyID || payload.replyId || payload.replyID ||
+                  payload.id || payload.MessageSid ||
+                  data.id || data.MessageSid || data.message_id || data.messageId;
 
   // Normalize the from number (add + prefix if needed)
   if (fromNumber && !fromNumber.startsWith('+')) {
@@ -242,8 +253,10 @@ function parseInboundWebhook(webhookData) {
     to: toNumber,
     message: messageBody,
     messageId: messageId,
-    timestamp: data.receivedDateUtc || data.DateCreated || data.timestamp || new Date().toISOString(),
-    type: data.type || 'sms_received'
+    timestamp: payload.ReceivedDateUtc || payload.receivedDateUtc ||
+               data.Timestamp || data.timestamp ||
+               data.receivedDateUtc || data.DateCreated || new Date().toISOString(),
+    type: data.Event || data.event || data.type || 'sms_received'
   };
 }
 
