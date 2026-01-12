@@ -13,13 +13,13 @@
 
 const https = require('https');
 
-// Notifyre Native API endpoint
-const NOTIFYRE_API_HOST = 'api.notifyre.com';
+// Notifyre Twexit API (Twilio-compatible)
+const TWEXIT_API_HOST = 'twilio.api.notifyre.com';
 
 /**
- * Send SMS via Notifyre Native API
+ * Send SMS via Notifyre Twexit API (Twilio-compatible)
  *
- * @param {string} accountId - Notifyre Account ID (unused, kept for compatibility)
+ * @param {string} accountId - Notifyre Account ID
  * @param {string} apiToken - Notifyre API Token
  * @param {string} to - Recipient phone number (E.164 format)
  * @param {string} message - SMS message content
@@ -27,7 +27,7 @@ const NOTIFYRE_API_HOST = 'api.notifyre.com';
  * @returns {Promise<{success: boolean, messageId?: string, error?: string}>}
  */
 async function sendSMS(accountId, apiToken, to, message, from) {
-  if (!apiToken) {
+  if (!accountId || !apiToken) {
     return { success: false, error: 'Notifyre credentials not configured' };
   }
 
@@ -44,38 +44,39 @@ async function sendSMS(accountId, apiToken, to, message, from) {
   const normalizedFrom = normalizePhoneNumber(from);
 
   try {
-    console.log('Notifyre: Sending SMS to', normalizedTo, 'from', normalizedFrom);
+    console.log('Notifyre Twexit: Sending SMS to', normalizedTo, 'from', normalizedFrom);
 
-    const response = await makeNotifyreRequest(apiToken, {
-      recipients: [normalizedTo],
-      from: normalizedFrom,
-      body: message
+    const response = await makeTwexitRequest(accountId, apiToken, {
+      To: normalizedTo,
+      From: normalizedFrom,
+      Body: message
     });
 
-    console.log('Notifyre: Response', JSON.stringify(response));
+    console.log('Notifyre Twexit: Response', JSON.stringify(response));
 
-    // Native API response
-    if (response.success || response.id || response.messageId) {
+    // Twexit API returns Twilio-like response with sid
+    if (response.sid || response.status === 'queued' || response.status === 'sent') {
       return {
         success: true,
-        messageId: response.id || response.messageId || response.message_id || null,
+        messageId: response.sid || null,
         response: response
       };
-    } else if (response.error || response.message) {
-      console.error('Notifyre: API returned error', response);
+    } else if (response.error_code || response.error_message) {
+      console.error('Notifyre Twexit: API returned error', response);
       return {
         success: false,
-        error: response.error || response.message || 'Unknown error'
+        error: response.error_message || `Error code: ${response.error_code}`
       };
     } else {
+      // Assume success if no error
       return {
         success: true,
-        messageId: null,
+        messageId: response.sid || null,
         response: response
       };
     }
   } catch (error) {
-    console.error('Notifyre sendSMS error:', error.message);
+    console.error('Notifyre Twexit sendSMS error:', error.message);
     return {
       success: false,
       error: error.message || 'Failed to send SMS'
@@ -84,32 +85,37 @@ async function sendSMS(accountId, apiToken, to, message, from) {
 }
 
 /**
- * Make HTTP request to Notifyre Native API
+ * Make HTTP request to Notifyre Twexit API
  *
+ * @param {string} accountId - Notifyre Account ID
  * @param {string} apiToken - Notifyre API Token
- * @param {object} body - Request body (recipients, from, body)
+ * @param {object} body - Request body (To, From, Body)
  * @returns {Promise<object>}
  */
-function makeNotifyreRequest(apiToken, body) {
+function makeTwexitRequest(accountId, apiToken, body) {
   return new Promise((resolve, reject) => {
-    const postData = JSON.stringify(body);
+    // Twexit API uses form-urlencoded like Twilio
+    const formData = new URLSearchParams(body).toString();
+
+    // Basic auth: base64(accountId:apiToken)
+    const authString = Buffer.from(`${accountId}:${apiToken}`).toString('base64');
 
     const options = {
-      hostname: NOTIFYRE_API_HOST,
+      hostname: TWEXIT_API_HOST,
       port: 443,
-      path: '/sms/send',
+      path: `/Accounts/${accountId}/Messages.json`,
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(postData),
-        'Authorization': `Bearer ${apiToken}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': Buffer.byteLength(formData),
+        'Authorization': `Basic ${authString}`,
         'Accept': 'application/json',
         'User-Agent': 'SmileDesk/1.0'
       }
     };
 
-    console.log('Notifyre: Making request to', `https://${NOTIFYRE_API_HOST}${options.path}`);
-    console.log('Notifyre: Request body', postData);
+    console.log('Notifyre Twexit: Making request to', `https://${TWEXIT_API_HOST}${options.path}`);
+    console.log('Notifyre Twexit: Request body', formData);
 
     const req = https.request(options, (res) => {
       let data = '';
@@ -119,12 +125,12 @@ function makeNotifyreRequest(apiToken, body) {
       });
 
       res.on('end', () => {
-        console.log('Notifyre: HTTP Status', res.statusCode);
-        console.log('Notifyre: Raw response', data);
+        console.log('Notifyre Twexit: HTTP Status', res.statusCode);
+        console.log('Notifyre Twexit: Raw response', data);
         try {
           const parsed = JSON.parse(data);
           if (res.statusCode >= 400) {
-            reject(new Error(parsed.message || parsed.error || `HTTP ${res.statusCode}`));
+            reject(new Error(parsed.message || parsed.error_message || `HTTP ${res.statusCode}`));
           } else {
             resolve(parsed);
           }
@@ -147,7 +153,7 @@ function makeNotifyreRequest(apiToken, body) {
       reject(new Error('Request timeout'));
     });
 
-    req.write(postData);
+    req.write(formData);
     req.end();
   });
 }
