@@ -96,14 +96,13 @@ function makeNotifyreRequest(apiToken, body) {
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(postData),
-        'x-api-token': apiToken,
+        'Authorization': `Bearer ${apiToken}`,
         'Accept': 'application/json'
       }
     };
 
     console.log('Notifyre: Making request to', `https://${NOTIFYRE_API_HOST}${options.path}`);
     console.log('Notifyre: Request body', postData);
-    console.log('Notifyre: Using x-api-token header');
 
     const req = https.request(options, (res) => {
       let data = '';
