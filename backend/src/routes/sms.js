@@ -63,28 +63,26 @@ async function handleInboundSMS(req, res) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
+    // Normalize the Notifyre number for comparison
+    const normalizedNotifyre = notifyre.normalizePhoneNumber(notifyreNumber);
+    // Extract just digits for flexible matching
+    const notifyreDigits = notifyreNumber.replace(/\D/g, '');
+
+    log.info({ notifyreNumber, normalizedNotifyre, notifyreDigits }, 'Looking up user by SMS number');
+
     // Find user by their Notifyre number (sms_reply_number in settings)
+    // Use flexible matching: exact, trimmed, normalized, or digits-only
     const userResult = await query(
       `SELECT s.*, u.id as user_id, u.practice_name
        FROM settings s
        JOIN users u ON s.user_id = u.id
-       WHERE s.sms_reply_number = $1`,
-      [notifyreNumber]
+       WHERE TRIM(s.sms_reply_number) = $1
+          OR TRIM(s.sms_reply_number) = $2
+          OR REPLACE(REPLACE(s.sms_reply_number, '+', ''), ' ', '') = $3`,
+      [notifyreNumber, normalizedNotifyre, notifyreDigits]
     );
 
-    // Fallback: try to find by the normalized phone number
     let settings = userResult.rows[0];
-    if (!settings) {
-      const normalizedNotifyre = notifyre.normalizePhoneNumber(notifyreNumber);
-      const fallbackResult = await query(
-        `SELECT s.*, u.id as user_id, u.practice_name
-         FROM settings s
-         JOIN users u ON s.user_id = u.id
-         WHERE s.sms_reply_number = $1`,
-        [normalizedNotifyre]
-      );
-      settings = fallbackResult.rows[0];
-    }
 
     // If still no match, try forwarding_phone as fallback
     if (!settings) {
@@ -92,9 +90,9 @@ async function handleInboundSMS(req, res) {
         `SELECT s.*, u.id as user_id, u.practice_name
          FROM settings s
          JOIN users u ON s.user_id = u.id
-         WHERE s.forwarding_phone = $1
+         WHERE REPLACE(REPLACE(s.forwarding_phone, '+', ''), ' ', '') LIKE '%' || $1
          LIMIT 1`,
-        [notifyre.normalizePhoneNumber(callerPhone)]
+        [notifyreDigits.slice(-9)]
       );
       settings = forwardingResult.rows[0];
     }
