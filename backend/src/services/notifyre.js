@@ -102,7 +102,7 @@ function makeNotifyreRequest(apiToken, body) {
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(postData),
-        'x-api-token': apiToken,
+        'Authorization': `Bearer ${apiToken}`,
         'Accept': 'application/json',
         'User-Agent': 'SmileDesk/1.0'
       }
