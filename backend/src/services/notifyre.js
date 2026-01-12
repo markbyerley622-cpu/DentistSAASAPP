@@ -13,13 +13,13 @@
 
 const https = require('https');
 
-// Notifyre Twexit API (Twilio-compatible)
-const NOTIFYRE_API_HOST = 'twilio.api.notifyre.com';
+// Notifyre Native API
+const NOTIFYRE_API_HOST = 'api.notifyre.com';
 
 /**
- * Send SMS via Notifyre Twexit API (Twilio-compatible)
+ * Send SMS via Notifyre Native API
  *
- * @param {string} accountId - Notifyre Account ID
+ * @param {string} accountId - Notifyre Account ID (unused but kept for API compatibility)
  * @param {string} apiToken - Notifyre API Token
  * @param {string} to - Recipient phone number (E.164 format)
  * @param {string} message - SMS message content
@@ -27,7 +27,7 @@ const NOTIFYRE_API_HOST = 'twilio.api.notifyre.com';
  * @returns {Promise<{success: boolean, messageId?: string, error?: string}>}
  */
 async function sendSMS(accountId, apiToken, to, message, from) {
-  if (!accountId || !apiToken) {
+  if (!apiToken) {
     return { success: false, error: 'Notifyre credentials not configured' };
   }
 
@@ -46,32 +46,44 @@ async function sendSMS(accountId, apiToken, to, message, from) {
   try {
     console.log('Notifyre: Sending SMS to', normalizedTo, 'from', normalizedFrom);
 
-    const response = await makeNotifyreRequest(accountId, apiToken, {
-      body: message,
-      from: normalizedFrom,
-      to: normalizedTo
+    const response = await makeNotifyreRequest(apiToken, {
+      Body: message,
+      Recipients: [
+        {
+          type: 'mobile_number',
+          value: normalizedTo
+        }
+      ],
+      From: normalizedFrom,
+      AddUnsubscribeLink: false
     });
 
     console.log('Notifyre: Response', JSON.stringify(response));
 
-    // Twexit API returns sid on success
-    if (response.sid) {
+    // Native API success check
+    if (response.payload && response.payload.id) {
       return {
         success: true,
-        messageId: response.sid,
+        messageId: response.payload.id,
         response: response
       };
-    } else if (response.error) {
+    } else if (response.statusCode && response.statusCode >= 200 && response.statusCode < 300) {
+      return {
+        success: true,
+        messageId: response.payload?.id || null,
+        response: response
+      };
+    } else if (response.message && response.statusCode >= 400) {
       console.error('Notifyre: API returned error', response);
       return {
         success: false,
-        error: response.error || response.message || 'Unknown error'
+        error: response.message || 'Unknown error'
       };
     } else {
-      // Assume success if no error
+      // Assume success if no explicit error
       return {
         success: true,
-        messageId: response.id || response.messageId || null,
+        messageId: response.id || response.payload?.id || null,
         response: response
       };
     }
@@ -85,35 +97,26 @@ async function sendSMS(accountId, apiToken, to, message, from) {
 }
 
 /**
- * Make HTTP request to Notifyre Twexit API (Twilio-compatible)
- * Uses Basic auth and form-urlencoded body
+ * Make HTTP request to Notifyre Native API
+ * Uses x-api-token header and JSON body
  *
- * @param {string} accountId - Notifyre Account ID
  * @param {string} apiToken - Notifyre API Token
- * @param {object} body - Request body (body, from, to)
+ * @param {object} body - Request body
  * @returns {Promise<object>}
  */
-function makeNotifyreRequest(accountId, apiToken, body) {
+function makeNotifyreRequest(apiToken, body) {
   return new Promise((resolve, reject) => {
-    // Form-urlencoded body
-    const formData = new URLSearchParams();
-    formData.append('body', body.body);
-    formData.append('from', body.from);
-    formData.append('to', body.to);
-    const postData = formData.toString();
-
-    // Basic auth: accountId:apiToken base64 encoded
-    const authString = Buffer.from(`${accountId}:${apiToken}`).toString('base64');
+    const postData = JSON.stringify(body);
 
     const options = {
       hostname: NOTIFYRE_API_HOST,
       port: 443,
-      path: `/Accounts/${accountId}/Messages.json`,
+      path: '/sms/send',
       method: 'POST',
       headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(postData),
-        'Authorization': `Basic ${authString}`,
+        'x-api-token': apiToken,
         'Accept': 'application/json'
       }
     };
