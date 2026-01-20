@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { callsAPI } from '../lib/api'
 import {
   Search,
@@ -9,7 +9,10 @@ import {
   Calendar,
   MessageSquare,
   AlertCircle,
-  CheckCircle2
+  CheckCircle2,
+  Send,
+  Loader2,
+  X
 } from 'lucide-react'
 
 // Format phone for display
@@ -141,6 +144,15 @@ export default function MissedCalls() {
   const [search, setSearch] = useState('')
   const [markingIds, setMarkingIds] = useState(new Set())
 
+  // Test SMS state
+  const [testPhone, setTestPhone] = useState('')
+  const [testingSms, setTestingSms] = useState(false)
+  const [testSuccess, setTestSuccess] = useState('')
+  const [testError, setTestError] = useState('')
+
+  // Polling interval ref
+  const pollIntervalRef = useRef(null)
+
   // Fetch active calls only (not done)
   const fetchActiveCalls = useCallback(async () => {
     try {
@@ -172,6 +184,43 @@ export default function MissedCalls() {
     }
   }, [search])
 
+  // Test SMS handler
+  const handleTestSms = async () => {
+    if (!testPhone) {
+      setTestError('Please enter your phone number')
+      return
+    }
+
+    setTestingSms(true)
+    setTestError('')
+    setTestSuccess('')
+    try {
+      const res = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/pbx/test-missed-call`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        },
+        body: JSON.stringify({ testPhone })
+      })
+
+      const data = await res.json()
+
+      if (res.ok && data.success) {
+        setTestSuccess('Test SMS sent! Reply to see it appear here.')
+        setTestPhone('')
+        // Refresh the list after a short delay to show the new entry
+        setTimeout(() => fetchActiveCalls(), 1000)
+      } else {
+        setTestError(data.error || 'Failed to send test SMS')
+      }
+    } catch (err) {
+      setTestError('Failed to send test SMS. Check your connection.')
+    } finally {
+      setTestingSms(false)
+    }
+  }
+
   // Initial load
   useEffect(() => {
     const load = async () => {
@@ -180,6 +229,19 @@ export default function MissedCalls() {
       setLoading(false)
     }
     load()
+  }, [fetchActiveCalls])
+
+  // Live polling - refresh every 5 seconds
+  useEffect(() => {
+    pollIntervalRef.current = setInterval(() => {
+      fetchActiveCalls()
+    }, 5000)
+
+    return () => {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current)
+      }
+    }
   }, [fetchActiveCalls])
 
   // Mark call as done - just remove from list (goes to History page)
@@ -223,7 +285,7 @@ export default function MissedCalls() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-dark-100">Missed Calls</h1>
-          <p className="text-dark-500 text-sm mt-1">Last 48 hours</p>
+          <p className="text-dark-500 text-sm mt-1">Last 48 hours • Updates live</p>
         </div>
 
         {/* Stats */}
@@ -243,6 +305,56 @@ export default function MissedCalls() {
         </div>
       </div>
 
+      {/* Demo: Test SMS Flow */}
+      <div className="p-4 rounded-xl bg-gradient-to-r from-accent-500/10 to-purple-500/10 border border-accent-500/20">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+          <div className="flex-1">
+            <p className="text-sm font-medium text-dark-200">Demo: Test SMS Flow</p>
+            <p className="text-xs text-dark-400 mt-0.5">Send a test SMS and reply to see it appear here live</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              type="tel"
+              value={testPhone}
+              onChange={(e) => setTestPhone(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleTestSms()}
+              placeholder="+61..."
+              className="w-36 px-3 py-2 rounded-lg bg-dark-800 border border-dark-600 text-dark-100 placeholder:text-dark-500 text-sm focus:outline-none focus:border-accent-500/50"
+            />
+            <button
+              onClick={handleTestSms}
+              disabled={testingSms || !testPhone}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-accent-600 hover:bg-accent-500 text-white text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {testingSms ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Send className="w-4 h-4" />
+              )}
+              Send Test
+            </button>
+          </div>
+        </div>
+        {/* Success/Error messages */}
+        {testSuccess && (
+          <div className="mt-3 flex items-center gap-2 p-2 rounded-lg bg-success-500/10 border border-success-500/20">
+            <CheckCircle2 className="w-4 h-4 text-success-400 shrink-0" />
+            <p className="text-xs text-success-400 flex-1">{testSuccess}</p>
+            <button onClick={() => setTestSuccess('')} className="text-success-400 hover:text-success-300">
+              <X className="w-3 h-3" />
+            </button>
+          </div>
+        )}
+        {testError && (
+          <div className="mt-3 flex items-center gap-2 p-2 rounded-lg bg-danger-500/10 border border-danger-500/20">
+            <AlertCircle className="w-4 h-4 text-danger-400 shrink-0" />
+            <p className="text-xs text-danger-400 flex-1">{testError}</p>
+            <button onClick={() => setTestError('')} className="text-danger-400 hover:text-danger-300">
+              <X className="w-3 h-3" />
+            </button>
+          </div>
+        )}
+      </div>
 
       {/* Search */}
       <div className="relative max-w-md">
