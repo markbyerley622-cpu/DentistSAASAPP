@@ -318,7 +318,7 @@ export default function MissedCalls() {
               value={testPhone}
               onChange={(e) => setTestPhone(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleTestSms()}
-              placeholder="+61..."
+              placeholder="0400 000 000"
               className="w-36 px-3 py-2 rounded-lg bg-dark-800 border border-dark-600 text-dark-100 placeholder:text-dark-500 text-sm focus:outline-none focus:border-accent-500/50"
             />
             <button
