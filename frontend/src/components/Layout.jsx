@@ -220,7 +220,7 @@ function Header({ setMobileOpen }) {
           {/* Status indicator */}
           <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-full bg-success-500/10 border border-success-500/20">
             <div className="w-2 h-2 rounded-full bg-success-500 animate-pulse" />
-            <span className="text-xs font-medium text-success-400">AI Active</span>
+            <span className="text-xs font-medium text-success-400">Active</span>
           </div>
 
           {/* User avatar - desktop */}

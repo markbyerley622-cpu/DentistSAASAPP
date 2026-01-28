@@ -112,7 +112,7 @@ export default function Dashboard() {
           subtitle="Total missed calls"
         />
         <StatCard
-          title="AI SMS Sent"
+          title="SMS Sent"
           value={stats?.newLeads?.value || 0}
           trend={stats?.newLeads?.trend}
           trendDirection={stats?.newLeads?.trendDirection}
@@ -212,9 +212,9 @@ export default function Dashboard() {
             </div>
           </div>
 
-          {/* AI Performance */}
+          {/* SMS Performance */}
           <div className="p-4 rounded-lg bg-dark-800/30">
-            <p className="text-sm text-dark-400 mb-4">AI Performance</p>
+            <p className="text-sm text-dark-400 mb-4">SMS Performance</p>
             <div className="text-center py-4">
               <div className="text-4xl font-bold text-dark-100 mb-1">
                 {stats?.conversionRate?.value || 0}%

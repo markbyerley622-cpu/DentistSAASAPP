@@ -225,7 +225,7 @@ export default function AdminDashboard() {
           value={`${stats?.responseRate || 0}%`}
           icon={MessageSquare}
           gradient="from-blue-500 to-blue-600"
-          subtitle="AI-handled calls"
+          subtitle="Automatically handled"
         />
         <StatCard
           title="Callbacks"
@@ -273,7 +273,7 @@ export default function AdminDashboard() {
           </div>
           <div className="space-y-1">
             <MetricRow label="Total Missed Calls" value={stats?.missedCalls || 0} />
-            <MetricRow label="AI Handled" value={stats?.aiHandledCalls || 0} subValue={`${stats?.responseRate || 0}%`} />
+            <MetricRow label="Auto Handled" value={stats?.aiHandledCalls || 0} subValue={`${stats?.responseRate || 0}%`} />
             <MetricRow label="Leads Created" value={stats?.totalLeads || 0} />
             <MetricRow label="Callback Requested" value={stats?.qualifiedLeads || 0} />
             <MetricRow label="Handled/Completed" value={stats?.handledLeads || 0} highlight />

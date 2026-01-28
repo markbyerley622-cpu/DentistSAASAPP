@@ -199,9 +199,9 @@ export default function Settings() {
     setSaving(true)
     try {
       await settingsAPI.updateAiGreeting({ aiGreeting: settings.aiGreeting })
-      setSuccess('AI greeting saved successfully!')
+      setSuccess('SMS message saved successfully!')
     } catch (err) {
-      setError(err.response?.data?.error?.message || 'Failed to save AI greeting')
+      setError(err.response?.data?.error?.message || 'Failed to save SMS message')
     } finally {
       setSaving(false)
     }
@@ -372,9 +372,9 @@ export default function Settings() {
         </div>
       </SettingsSection>
 
-      {/* AI SMS Message */}
+      {/* SMS Message */}
       <SettingsSection
-        title="AI SMS Message"
+        title="SMS Message"
         description="Customize the SMS message sent to patients"
         icon={Sparkles}
       >
@@ -457,7 +457,7 @@ export default function Settings() {
       {/* Business Hours */}
       <SettingsSection
         title="Business Hours"
-        description="Set your practice hours - the AI will offer appointments during these times"
+        description="Set your practice hours - the system will offer appointments during these times"
         icon={Clock}
       >
         <div className="space-y-4">
